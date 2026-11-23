@@ -16,7 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { parseCustomRuleLines } from "../lib/configBuilder";
+import { countCustomRules, parseCustomRuleLines } from "../lib/configBuilder";
 import { formatBytes, formatSpeed } from "../lib/formatters";
 import { getNodeDisplayMap, resolveNodeDisplayName } from "../lib/uriParser";
 import { useAppStore } from "../store/useAppStore";
@@ -89,6 +89,8 @@ export function DashboardView() {
   const setForceProxyText = useAppStore((s) => s.setForceProxyText);
   const forceDirectText = useAppStore((s) => s.forceDirectText);
   const setForceDirectText = useAppStore((s) => s.setForceDirectText);
+  const aiSuiteProxyEnabled = useAppStore((s) => s.aiSuiteProxyEnabled);
+  const setAiSuiteProxyEnabled = useAppStore((s) => s.setAiSuiteProxyEnabled);
   const rulesDirty = useAppStore((s) => s.rulesDirty);
   const applyCustomRules = useAppStore((s) => s.applyCustomRules);
 
@@ -98,15 +100,15 @@ export function DashboardView() {
 
   const [showRulesModal, setShowRulesModal] = useState(false);
 
-  const proxyRuleCount = useMemo(() => {
-    const p = parseCustomRuleLines(forceProxyText);
-    return p.domainSuffixes.length + p.processNames.length;
-  }, [forceProxyText]);
+  const proxyRuleCount = useMemo(
+    () => countCustomRules(parseCustomRuleLines(forceProxyText)),
+    [forceProxyText],
+  );
 
-  const directRuleCount = useMemo(() => {
-    const d = parseCustomRuleLines(forceDirectText);
-    return d.domainSuffixes.length + d.processNames.length;
-  }, [forceDirectText]);
+  const directRuleCount = useMemo(
+    () => countCustomRules(parseCustomRuleLines(forceDirectText)),
+    [forceDirectText],
+  );
 
   const totalCustomRules = proxyRuleCount + directRuleCount;
 
@@ -540,7 +542,9 @@ export function DashboardView() {
               )}
             </div>
           ) : (
-            <span className="text-[11px] text-slate-400">默认自动分流</span>
+            <span className="text-[11px] text-slate-400">
+              {aiSuiteProxyEnabled ? "智能分流 · AI 加速" : "默认智能分流"}
+            </span>
           )}
         </div>
 
@@ -558,7 +562,7 @@ export function DashboardView() {
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="flex h-[390px] w-[580px] flex-col rounded-[28px] bg-white p-5 shadow-2xl ring-1 ring-black/[0.05] dark:bg-[#161922] dark:ring-white/[0.08]"
+            className="flex h-[440px] w-[600px] flex-col rounded-[28px] bg-white p-5 shadow-2xl ring-1 ring-black/[0.05] dark:bg-[#161922] dark:ring-white/[0.08]"
           >
             <div className="mb-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -566,7 +570,7 @@ export function DashboardView() {
                   自定义分流
                 </h3>
                 <span className="text-[11px] text-slate-400">
-                  每行一个域名后缀或 .exe 进程
+                  支持域名、IP/CIDR、.exe 进程 · 冲突时直连优先
                 </span>
               </div>
 
@@ -595,7 +599,7 @@ export function DashboardView() {
                   value={forceProxyText}
                   onChange={(e) => setForceProxyText(e.target.value)}
                   spellCheck={false}
-                  placeholder={"openai.com\nclaude.ai\ncursor.exe"}
+                  placeholder={"openai.com\n1.1.1.1/32\nfull:api.example.com\ncursor.exe"}
                   className="min-h-0 flex-1 resize-none bg-transparent px-1 font-mono text-xs leading-relaxed text-slate-800 placeholder:text-slate-400/60 focus:outline-none dark:text-slate-200 dark:placeholder:text-slate-600"
                 />
               </div>
@@ -615,13 +619,41 @@ export function DashboardView() {
                   value={forceDirectText}
                   onChange={(e) => setForceDirectText(e.target.value)}
                   spellCheck={false}
-                  placeholder={"qq.com\nbilibili.com\nWeChat.exe"}
+                  placeholder={"qq.com\n10.8.0.0/16\nkeyword:corp\nWeChat.exe"}
                   className="min-h-0 flex-1 resize-none bg-transparent px-1 font-mono text-xs leading-relaxed text-slate-800 placeholder:text-slate-400/60 focus:outline-none dark:text-slate-200 dark:placeholder:text-slate-600"
                 />
               </div>
             </div>
 
-            <div className="mt-4 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setAiSuiteProxyEnabled(!aiSuiteProxyEnabled)}
+              className="mt-3 flex items-center justify-between rounded-[18px] bg-[#F6F7FA] px-3.5 py-2 text-left transition hover:bg-slate-200/60 dark:bg-white/[0.04] dark:hover:bg-white/[0.07] cursor-pointer"
+            >
+              <div className="min-w-0 pr-3">
+                <div className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                  内置 AI 套件加速
+                </div>
+                <div className="truncate text-[10px] text-slate-400">
+                  Antigravity / Cursor / Grok / ChatGPT / Claude 域名与专属进程优先走代理
+                </div>
+              </div>
+              <div
+                className={`h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors ${
+                  aiSuiteProxyEnabled
+                    ? "bg-blue-600"
+                    : "bg-slate-200 dark:bg-white/[0.12]"
+                }`}
+              >
+                <div
+                  className={`h-4 w-4 rounded-full bg-white shadow-2xs transition-transform ${
+                    aiSuiteProxyEnabled ? "translate-x-4" : "translate-x-0"
+                  }`}
+                />
+              </div>
+            </button>
+
+            <div className="mt-3.5 flex items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setShowRulesModal(false)}

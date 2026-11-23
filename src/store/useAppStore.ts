@@ -73,6 +73,8 @@ const RESERVED_IDS = new Set([
   "proxy",
   "auto",
   "direct",
+  "dns-hosts",
+  "dns-local",
   "dns-direct",
   "dns-remote",
 ]);
@@ -87,6 +89,7 @@ export interface PersistedAppState {
   tunMode: boolean;
   forceProxyText: string;
   forceDirectText: string;
+  aiSuiteProxyEnabled: boolean;
   theme: ThemeMode;
   terminalShell: "powershell" | "cmd";
   /** 未声明带宽的 HY2 节点使用的默认下行 Mbps；0 = BBR */
@@ -110,6 +113,7 @@ const PERSISTED_KEYS: (keyof PersistedAppState)[] = [
   "tunMode",
   "forceProxyText",
   "forceDirectText",
+  "aiSuiteProxyEnabled",
   "theme",
   "terminalShell",
   "brutalDownMbps",
@@ -131,6 +135,7 @@ interface EffectiveRuntimeSnapshot {
   tunMode: boolean;
   forceProxyText: string;
   forceDirectText: string;
+  aiSuiteProxyEnabled: boolean;
   brutalDownMbps: number;
   brutalUpMbps: number;
 }
@@ -259,6 +264,7 @@ export interface AppState extends PersistedAppState {
   selectOutbound: (idOrBuiltin: string) => Promise<void>;
   setForceProxyText: (val: string) => void;
   setForceDirectText: (val: string) => void;
+  setAiSuiteProxyEnabled: (val: boolean) => void;
   applyCustomRules: () => Promise<boolean>;
 
   importFromClipboard: () => Promise<void>;
@@ -436,6 +442,9 @@ export function migratePersistedState(
   if (typeof raw.forceDirectText === "string") {
     migrated.forceDirectText = raw.forceDirectText;
   }
+  if (typeof raw.aiSuiteProxyEnabled === "boolean") {
+    migrated.aiSuiteProxyEnabled = raw.aiSuiteProxyEnabled;
+  }
   if (raw.theme === "system" || raw.theme === "light" || raw.theme === "dark") {
     migrated.theme = raw.theme;
   }
@@ -499,6 +508,7 @@ export function extractPersistedAppState(state: AppState): PersistedAppState {
     tunMode: state.tunMode,
     forceProxyText: state.forceProxyText,
     forceDirectText: state.forceDirectText,
+    aiSuiteProxyEnabled: state.aiSuiteProxyEnabled,
     theme: state.theme,
     terminalShell: state.terminalShell,
     brutalDownMbps: state.brutalDownMbps,
@@ -550,6 +560,7 @@ function captureEffectiveSnapshot(state: AppState): EffectiveRuntimeSnapshot {
     tunMode: state.tunMode,
     forceProxyText: state.forceProxyText,
     forceDirectText: state.forceDirectText,
+    aiSuiteProxyEnabled: state.aiSuiteProxyEnabled,
     brutalDownMbps: state.brutalDownMbps,
     brutalUpMbps: state.brutalUpMbps,
   };
@@ -945,6 +956,7 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
         tunMode: state.tunMode,
         forceProxyText: state.forceProxyText,
         forceDirectText: state.forceDirectText,
+        aiSuiteProxyEnabled: state.aiSuiteProxyEnabled,
         brutalDownMbps: brutalDown,
         brutalUpMbps: brutalUp,
       });
@@ -983,12 +995,14 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
           ? {
               forceProxyText: snap.forceProxyText,
               forceDirectText: snap.forceDirectText,
+              aiSuiteProxyEnabled: snap.aiSuiteProxyEnabled,
               rulesDirty: false,
             }
           : {
               rulesDirty:
                 cur.forceProxyText !== snap.forceProxyText ||
-                cur.forceDirectText !== snap.forceDirectText,
+                cur.forceDirectText !== snap.forceDirectText ||
+                cur.aiSuiteProxyEnabled !== snap.aiSuiteProxyEnabled,
             }),
       }));
     };
@@ -1252,6 +1266,7 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
       tunMode: false,
       forceProxyText: "",
       forceDirectText: "",
+      aiSuiteProxyEnabled: true,
       theme: "system",
       terminalShell: "powershell",
       brutalDownMbps: 800,
@@ -1976,6 +1991,9 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
 
       setForceDirectText: (val) =>
         set((s) => ({ forceDirectText: val, rulesDirty: s.connected })),
+
+      setAiSuiteProxyEnabled: (val) =>
+        set((s) => ({ aiSuiteProxyEnabled: val, rulesDirty: s.connected })),
 
       applyCustomRules: async () => {
         if (get().connected) {

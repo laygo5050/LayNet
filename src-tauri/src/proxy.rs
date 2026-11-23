@@ -21,11 +21,26 @@ use windows_sys::Win32::{
     },
 };
 
-/// 局域网与本地地址完整排除列表（覆盖 localhost、127.0.0.0/8、10.0.0.0/8、172.16.0.0/12 全段、192.168.0.0/16 及 <local>）
-pub const PROXY_OVERRIDE: &str = "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;<local>";
+/// 局域网与本地地址完整排除列表（覆盖 localhost、127.0.0.0/8、10.0.0.0/8、100.64.0.0/10 CGNAT/Tailscale、169.254.0.0/16、172.16.0.0/12、192.168.0.0/16、常见局域网后缀及 <local>）
+pub const PROXY_OVERRIDE: &str = concat!(
+    "localhost;127.*;10.*;",
+    "100.64.*;100.65.*;100.66.*;100.67.*;100.68.*;100.69.*;100.70.*;100.71.*;",
+    "100.72.*;100.73.*;100.74.*;100.75.*;100.76.*;100.77.*;100.78.*;100.79.*;",
+    "100.80.*;100.81.*;100.82.*;100.83.*;100.84.*;100.85.*;100.86.*;100.87.*;",
+    "100.88.*;100.89.*;100.90.*;100.91.*;100.92.*;100.93.*;100.94.*;100.95.*;",
+    "100.96.*;100.97.*;100.98.*;100.99.*;100.100.*;100.101.*;100.102.*;100.103.*;",
+    "100.104.*;100.105.*;100.106.*;100.107.*;100.108.*;100.109.*;100.110.*;100.111.*;",
+    "100.112.*;100.113.*;100.114.*;100.115.*;100.116.*;100.117.*;100.118.*;100.119.*;",
+    "100.120.*;100.121.*;100.122.*;100.123.*;100.124.*;100.125.*;100.126.*;100.127.*;",
+    "169.254.*;",
+    "172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;",
+    "172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;",
+    "192.168.*;*.local;*.lan;*.home.arpa;*.internal;*.intranet;<local>"
+);
 
-/// 供 Antigravity `language_server.exe`（Go 进程）及终端工具读取的本地直连排除列表，防止本地 Hub 与 OAuth 回调白屏
-const USER_NO_PROXY: &str = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
+/// 供 Antigravity 与终端工具读取的本地直连排除列表，防止本地 Hub、OAuth 回调与局域网服务走代理
+const USER_NO_PROXY: &str = "localhost,127.0.0.1,::1,10.0.0.0/8,100.64.0.0/10,169.254.0.0/16,172.16.0.0/12,192.168.0.0/16,.local,.lan,.home.arpa";
+const LEGACY_USER_NO_PROXY: &str = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
 
 #[cfg(windows)]
 const INTERNET_SETTINGS_PATH: &str =
@@ -204,7 +219,13 @@ fn sync_user_proxy_env(enable: bool, host: &str, port: u16) {
                 RegDeleteValueW(hkey, w.as_ptr());
                 changed = true;
             }
-            if changed && read_reg_sz(hkey, "NO_PROXY").as_deref() == Some(USER_NO_PROXY) {
+            let cur_no_proxy = read_reg_sz(hkey, "NO_PROXY");
+            if changed
+                && matches!(
+                    cur_no_proxy.as_deref(),
+                    Some(USER_NO_PROXY) | Some(LEGACY_USER_NO_PROXY)
+                )
+            {
                 let w = to_wide("NO_PROXY");
                 RegDeleteValueW(hkey, w.as_ptr());
             }
@@ -461,5 +482,15 @@ mod tests {
         assert!(is_laynet_env_value("http://127.0.0.1:7890", "127.0.0.1", 7890));
         assert!(is_laynet_env_value("HTTP://127.0.0.1:7890", "127.0.0.1", 7890));
         assert!(!is_laynet_env_value("http://127.0.0.1:10809", "127.0.0.1", 7890));
+    }
+
+    #[test]
+    fn proxy_override_covers_cgnat_lan_and_stays_within_wininet_limit() {
+        assert!(PROXY_OVERRIDE.contains("100.64.*;"));
+        assert!(PROXY_OVERRIDE.contains("100.127.*;"));
+        assert!(PROXY_OVERRIDE.contains("169.254.*;"));
+        assert!(PROXY_OVERRIDE.contains("*.local;"));
+        assert!(PROXY_OVERRIDE.contains("<local>"));
+        assert!(PROXY_OVERRIDE.len() < 1500);
     }
 }
