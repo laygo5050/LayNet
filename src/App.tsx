@@ -8,15 +8,10 @@ import { ToastContainer } from "./components/ToastContainer";
 import { TunPrivilegeModal } from "./components/TunPrivilegeModal";
 import { useAppStore } from "./store/useAppStore";
 
-const ENGINE_CONFIG_REV = 2;
-
 export default function App() {
   const activeTab = useAppStore((s) => s.activeTab);
   const theme = useAppStore((s) => s.theme);
-  const connected = useAppStore((s) => s.connected);
-  const connecting = useAppStore((s) => s.connecting);
   const initializeApp = useAppStore((s) => s.initializeApp);
-  const reloadCoreConfig = useAppStore((s) => s.reloadCoreConfig);
   const setWindowVisible = useAppStore((s) => s.setWindowVisible);
 
   useEffect(() => {
@@ -32,18 +27,6 @@ export default function App() {
     document.addEventListener("visibilitychange", onVisChange);
     return () => document.removeEventListener("visibilitychange", onVisChange);
   }, [setWindowVisible]);
-
-  useEffect(() => {
-    const win = window as unknown as { __LAYNET_ENGINE_REV__?: number };
-    if (!connected) {
-      win.__LAYNET_ENGINE_REV__ = ENGINE_CONFIG_REV;
-      return;
-    }
-    if (!connecting && win.__LAYNET_ENGINE_REV__ !== ENGINE_CONFIG_REV) {
-      win.__LAYNET_ENGINE_REV__ = ENGINE_CONFIG_REV;
-      void reloadCoreConfig(true);
-    }
-  }, [connected, connecting, reloadCoreConfig]);
 
   useEffect(() => {
     const root = document.documentElement;

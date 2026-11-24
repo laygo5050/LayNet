@@ -39,7 +39,7 @@ export function decodeBase64Utf8(input: string): string | null {
   }
 }
 
-function makeId(): string {
+export function makeNodeId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
   }
@@ -78,13 +78,37 @@ export function normalizeMportToSingBox(mportRaw: string): string[] {
   return result;
 }
 
-/**
- * 解析通用传输层参数（ws / grpc / http）
- */
-function parseTransport(params: URLSearchParams): NodeTransportConfig | undefined {
-  const netType = (params.get("type") || params.get("net") || "tcp").toLowerCase();
+interface ParsedTransportResult {
+  transport?: NodeTransportConfig;
+  unsupported: boolean;
+}
 
-  if (netType === "ws" || netType === "websocket" || netType === "httpupgrade") {
+/**
+ * 解析通用传输层参数（tcp/raw / ws / httpupgrade / grpc/gun / http/h2）
+ * 若遇到当前内核不支持的传输层（如 xhttp / splithttp / kcp / quic），显式标记 unsupported 以避免静默降级为错误裸 TCP
+ */
+function parseTransport(params: URLSearchParams): ParsedTransportResult {
+  const netType = (params.get("type") || params.get("net") || "tcp").trim().toLowerCase();
+
+  if (!netType || netType === "tcp" || netType === "raw" || netType === "none") {
+    const headerType = (params.get("headerType") || "none").trim().toLowerCase();
+    if (headerType && headerType !== "none") {
+      if (headerType === "http") {
+        return {
+          transport: {
+            type: "http",
+            path: safeDecodeURIComponent(params.get("path") || "/"),
+            host: params.get("host") || undefined,
+          },
+          unsupported: false,
+        };
+      }
+      return { unsupported: true };
+    }
+    return { transport: undefined, unsupported: false };
+  }
+
+  if (netType === "ws" || netType === "websocket") {
     let rawPath = safeDecodeURIComponent(params.get("path") || "/");
     let maxEarlyData: number | undefined;
     let earlyDataHeaderName: string | undefined;
@@ -104,33 +128,65 @@ function parseTransport(params: URLSearchParams): NodeTransportConfig | undefine
 
     const host = params.get("host") || undefined;
     return {
-      type: "ws",
-      path: rawPath,
-      host,
-      maxEarlyData,
-      earlyDataHeaderName,
+      transport: {
+        type: "ws",
+        path: rawPath,
+        host,
+        maxEarlyData,
+        earlyDataHeaderName,
+      },
+      unsupported: false,
     };
   }
 
-  if (netType === "grpc") {
+  if (netType === "httpupgrade") {
+    let rawPath = safeDecodeURIComponent(params.get("path") || "/");
+    // httpupgrade 剥离可能附带的 ?ed= 参数，sing-box v1.14 使用独立 type: "httpupgrade"
+    const edMatch = rawPath.match(/^(.*?)(?:\?|&)ed=(\d+)(.*)$/i);
+    if (edMatch) {
+      const prefix = edMatch[1] || "/";
+      const suffix = edMatch[3] ? `?${edMatch[3].replace(/^[?&]/, "")}` : "";
+      rawPath = prefix + suffix;
+    }
+    if (!rawPath.startsWith("/")) {
+      rawPath = `/${rawPath}`;
+    }
+    const host = params.get("host") || undefined;
+    return {
+      transport: {
+        type: "httpupgrade",
+        path: rawPath,
+        host,
+      },
+      unsupported: false,
+    };
+  }
+
+  if (netType === "grpc" || netType === "gun") {
     const serviceName = safeDecodeURIComponent(
       params.get("serviceName") || params.get("path") || "",
     ).replace(/^\//, "");
     return {
-      type: "grpc",
-      serviceName,
+      transport: {
+        type: "grpc",
+        serviceName,
+      },
+      unsupported: false,
     };
   }
 
   if (netType === "http" || netType === "h2") {
     return {
-      type: "http",
-      path: safeDecodeURIComponent(params.get("path") || "/"),
-      host: params.get("host") || undefined,
+      transport: {
+        type: "http",
+        path: safeDecodeURIComponent(params.get("path") || "/"),
+        host: params.get("host") || undefined,
+      },
+      unsupported: false,
     };
   }
 
-  return undefined;
+  return { unsupported: true };
 }
 
 function splitHostPort(hostPortStr: string, defaultPort = 443): {
@@ -208,18 +264,18 @@ function dissectStandardProxyUri(uri: string, defaultPort = 443): {
     rest = rest.slice(0, qIdx);
   }
 
-  // 去除路径尾部斜杠
-  const slashIdx = rest.indexOf("/");
-  if (slashIdx !== -1) {
-    rest = rest.slice(0, slashIdx);
-  }
-
+  // 必须先按最后一个 @ 拆分认证信息与主机端口，再剥离主机端口后的路径 /，防止密码含 / 时截断 @host:port
   const atIdx = rest.lastIndexOf("@");
   let userinfo = "";
   let hostPortPart = rest;
   if (atIdx !== -1) {
     userinfo = safeDecodeURIComponent(rest.slice(0, atIdx));
     hostPortPart = rest.slice(atIdx + 1);
+  }
+
+  const slashIdx = hostPortPart.indexOf("/");
+  if (slashIdx !== -1) {
+    hostPortPart = hostPortPart.slice(0, slashIdx);
   }
 
   const hp = splitHostPort(hostPortPart, defaultPort);
@@ -262,7 +318,8 @@ function parseVlessUri(uri: string): ProxyNode | null {
         .filter(Boolean)
     : undefined;
 
-  const transport = parseTransport(params);
+  const { transport, unsupported } = parseTransport(params);
+  if (unsupported) return null;
 
   let reality: { publicKey: string; shortId: string } | undefined;
   if (isReality) {
@@ -273,7 +330,7 @@ function parseVlessUri(uri: string): ProxyNode | null {
   }
 
   const name = remark || `VLESS ${host}:${port}`;
-  const id = makeId();
+  const id = makeNodeId();
   return {
     id,
     tag: makeStableOutboundTag(id),
@@ -393,7 +450,7 @@ function parseHysteria2Uri(uri: string): ProxyNode | null {
   const downMbps = Number.isFinite(downRaw) && downRaw > 0 ? downRaw : undefined;
 
   const name = remark || `HY2 ${host}:${port}`;
-  const id = makeId();
+  const id = makeNodeId();
   return {
     id,
     tag: makeStableOutboundTag(id),
@@ -432,27 +489,24 @@ function parseShadowsocksUri(uri: string): ProxyNode | null {
   }
   body = body.replace(/\/$/, "");
 
-  // 若整体不含 @，说明是 Legacy 全量 Base64 格式 ss://BASE64(method:password@host:port)
+  // 若整体不含 @，说明是 Legacy 全量 Base64 格式 ss://BASE64(method:password@host:port)，兼容 URL 编码填充符 %3D
   if (!body.includes("@")) {
-    const decodedAll = decodeBase64Utf8(body);
+    const decodedAll =
+      decodeBase64Utf8(body) ?? decodeBase64Utf8(safeDecodeURIComponent(body));
     if (!decodedAll || !decodedAll.includes("@")) return null;
     body = decodedAll.trim();
   }
 
   const atIdx = body.lastIndexOf("@");
   if (atIdx === -1) return null;
-  let userPart = body.slice(0, atIdx);
-  const hostPortPart = body.slice(atIdx + 1);
+  let userPart = safeDecodeURIComponent(body.slice(0, atIdx));
+  const hostPortPart = body.slice(atIdx + 1).replace(/\/.*$/, "");
 
   if (!userPart.includes(":")) {
     const decodedUser = decodeBase64Utf8(userPart);
     if (decodedUser && decodedUser.includes(":")) {
       userPart = decodedUser;
-    } else {
-      userPart = safeDecodeURIComponent(userPart);
     }
-  } else {
-    userPart = safeDecodeURIComponent(userPart);
   }
 
   const colonIdx = userPart.indexOf(":");
@@ -480,7 +534,7 @@ function parseShadowsocksUri(uri: string): ProxyNode | null {
   }
 
   const name = remark || `SS ${hp.host}:${hp.port}`;
-  const id = makeId();
+  const id = makeNodeId();
   return {
     id,
     tag: makeStableOutboundTag(id),
@@ -519,9 +573,10 @@ function parseTrojanUri(uri: string): ProxyNode | null {
         .filter(Boolean)
     : undefined;
 
-  const transport = parseTransport(params);
+  const { transport, unsupported } = parseTransport(params);
+  if (unsupported) return null;
   const name = remark || `Trojan ${host}:${port}`;
-  const id = makeId();
+  const id = makeNodeId();
 
   return {
     id,
@@ -625,13 +680,71 @@ export function parseBatchSubscriptionContent(
   return parseShareBatch(rawText, subscriptionId).nodes;
 }
 
-const RESERVED_OUTBOUND_TAGS = new Set([
+export const RESERVED_OUTBOUND_TAGS = new Set([
   "proxy",
   "auto",
   "direct",
+  "dns-hosts",
+  "dns-local",
   "dns-direct",
   "dns-remote",
 ]);
+
+/**
+ * 编辑 Hysteria2 节点参数时规范化重建 rawUri，清理可能残留在主机端口段的内联跳跃区间（如 :20000-40000）
+ */
+export function rebuildHysteria2RawUri(
+  node: ProxyNode,
+  patch: {
+    name: string;
+    mport?: string;
+    downMbps?: number;
+    upMbps?: number;
+  },
+): string {
+  const hashIdx = node.rawUri.indexOf("#");
+  const withoutHash =
+    hashIdx === -1 ? node.rawUri : node.rawUri.slice(0, hashIdx);
+  const qIdx = withoutHash.indexOf("?");
+  const rawPrefix = qIdx === -1 ? withoutHash : withoutHash.slice(0, qIdx);
+  const params = new URLSearchParams(
+    qIdx === -1 ? "" : withoutHash.slice(qIdx + 1),
+  );
+
+  // 将 scheme://userinfo@host:inlineRange 规范还原为单端口 scheme://userinfo@host:serverPort
+  const schemeIdx = rawPrefix.indexOf("://");
+  let cleanPrefix = rawPrefix;
+  if (schemeIdx !== -1) {
+    const schemePart = rawPrefix.slice(0, schemeIdx + 3);
+    const authority = rawPrefix.slice(schemeIdx + 3);
+    const atIdx = authority.lastIndexOf("@");
+    const userPrefix = atIdx === -1 ? "" : `${authority.slice(0, atIdx + 1)}`;
+    const hostFormatted =
+      node.server.includes(":") && !node.server.startsWith("[")
+        ? `[${node.server}]`
+        : node.server;
+    cleanPrefix = `${schemePart}${userPrefix}${hostFormatted}:${node.serverPort}`;
+  }
+
+  if (patch.mport && patch.mport.trim()) {
+    params.set("mport", patch.mport.trim());
+  } else {
+    params.delete("mport");
+  }
+  if (patch.downMbps && patch.downMbps > 0) {
+    params.set("downmbps", String(patch.downMbps));
+  } else {
+    params.delete("downmbps");
+  }
+  if (patch.upMbps && patch.upMbps > 0) {
+    params.set("upmbps", String(patch.upMbps));
+  } else {
+    params.delete("upmbps");
+  }
+
+  const qs = params.toString();
+  return `${cleanPrefix}${qs ? `?${qs}` : ""}#${encodeURIComponent(patch.name)}`;
+}
 
 /**
  * 基于稳定节点 ID 生成 sing-box / Clash 内部出站 tag，避免因备注重名、修改名称或排序变化导致 tag 漂移
@@ -777,13 +890,14 @@ export function getNodeDisplayMap(nodes: ProxyNode[]): Map<string, string> {
 export function resolveNodeDisplayName(
   nodes: ProxyNode[],
   idOrTag: string | null | undefined,
+  displayMap?: Map<string, string>,
 ): string | null {
   if (!idOrTag) return null;
   if (idOrTag === "auto") return "自动选择";
   if (idOrTag === "direct") return "direct";
   const matched = nodes.find((n) => n.id === idOrTag || n.tag === idOrTag);
   if (!matched) return idOrTag;
-  return getNodeDisplayMap(nodes).get(matched.id) ?? matched.name;
+  return (displayMap ?? getNodeDisplayMap(nodes)).get(matched.id) ?? matched.name;
 }
 
 /**
@@ -797,7 +911,7 @@ export function ensureUniqueTags(nodes: ProxyNode[]): ProxyNode[] {
     let id = typeof node.id === "string" ? node.id.trim() : "";
     if (!id || seenIds.has(id)) {
       do {
-        id = makeId();
+        id = makeNodeId();
       } while (seenIds.has(id));
     }
     seenIds.add(id);

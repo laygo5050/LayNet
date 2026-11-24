@@ -11,7 +11,6 @@
     "core:window:allow-minimize",
     "core:window:allow-set-focus",
     "opener:default",
-    "shell:default",
     {
       "identifier": "shell:allow-execute",
       "allow": [
@@ -32,7 +31,6 @@
         }
       ]
     },
-    "shell:allow-kill",
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled",

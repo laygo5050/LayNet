@@ -70,6 +70,7 @@ export function DashboardView() {
   const selectedOutbound = useAppStore((s) => s.selectedOutbound);
   const autoWinnerNode = useAppStore((s) => s.autoWinnerNode);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
+  const setSettingsSubTab = useAppStore((s) => s.setSettingsSubTab);
 
   const routingMode = useAppStore((s) => s.routingMode);
   const setRoutingMode = useAppStore((s) => s.setRoutingMode);
@@ -112,17 +113,23 @@ export function DashboardView() {
 
   const totalCustomRules = proxyRuleCount + directRuleCount;
 
+  const displayMap = useMemo(() => getNodeDisplayMap(nodes), [nodes]);
+
   const activeNodeDisplay = useMemo(() => {
     if (nodes.length === 0) return "添加节点";
     if (selectedOutbound === "auto") {
-      const winnerLabel = resolveNodeDisplayName(nodes, autoWinnerNode);
+      const winnerLabel = resolveNodeDisplayName(
+        nodes,
+        autoWinnerNode,
+        displayMap,
+      );
       return winnerLabel ? `自动 · ${winnerLabel}` : "自动选择";
     }
     if (selectedOutbound === "direct") {
       return "直连模式";
     }
-    return getNodeDisplayMap(nodes).get(selectedOutbound) ?? "自动选择";
-  }, [nodes, selectedOutbound, autoWinnerNode]);
+    return displayMap.get(selectedOutbound) ?? "自动选择";
+  }, [nodes, selectedOutbound, autoWinnerNode, displayMap]);
 
   const activeLatency = useMemo(() => {
     if (selectedOutbound === "auto") {
@@ -286,7 +293,10 @@ export function DashboardView() {
 
             <button
               type="button"
-              onClick={() => setActiveTab("settings")}
+              onClick={() => {
+                setSettingsSubTab("connections");
+                setActiveTab("settings");
+              }}
               className="flex items-center gap-1 rounded-full bg-[#F4F5F8] px-2.5 py-1 text-[10px] font-semibold text-slate-500 transition hover:bg-slate-200/75 hover:text-slate-800 dark:bg-white/[0.06] dark:text-slate-400 dark:hover:text-slate-200 cursor-pointer"
             >
               <Activity className="h-3 w-3 text-blue-500" />
@@ -570,7 +580,7 @@ export function DashboardView() {
                   自定义分流
                 </h3>
                 <span className="text-[11px] text-slate-400">
-                  支持域名、IP/CIDR、.exe 进程 · 冲突时直连优先
+                  支持域名、CIDR、Clash 语法、.exe 进程（忽略大小写；非系统代理应用需开 TUN）· 直连优先
                 </span>
               </div>
 
@@ -635,7 +645,7 @@ export function DashboardView() {
                   内置 AI 套件加速
                 </div>
                 <div className="truncate text-[10px] text-slate-400">
-                  Antigravity / Cursor / Grok / ChatGPT / Claude 域名与专属进程优先走代理
+                  AI 核心域名强制代理防掉登录 · 专属进程访问国内直连、海外自动代理
                 </div>
               </div>
               <div

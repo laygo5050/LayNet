@@ -39,8 +39,8 @@ export const PRIVATE_LOCAL_SUFFIXES = [
 /**
  * 内置五大 AI 套件（Antigravity / Cursor / Grok / ChatGPT & Codex / Claude）加速清单：
  * - 已剔除 `agent.exe` / `inno_updater.exe` / `elevate.exe` / `language_server.exe` 等易与第三方软件碰撞的泛用进程名；
- * - 进程规则位于 `ip_is_private -> direct` 之后，确保本地 127.0.0.1 通信直连不白屏；
- * - 域名规则位于 `geosite-cn` 之前，可在自定义分流弹窗中按需一键开关。
+ * - 域名规则位于 `geosite-cn` 之上（防止带 `@cn` 标记的登录/更新 CDN 被误判直连掉登录）；
+ * - 进程规则采用不区分大小写的 `process_path_regex` 并置于 `geosite-cn` / `geoip-cn` 之后，确保 IDE 内调用国内大模型 API、国内镜像源与国内公网机 0ms 直连，同时未知海外接口自动走代理。
  */
 export const AI_SUITE_FORCE_PROXY_PROCESSES = [
   // Antigravity (Google)
@@ -48,11 +48,9 @@ export const AI_SUITE_FORCE_PROXY_PROCESSES = [
   "AntigravitySetup.exe",
   // Cursor
   "Cursor.exe",
-  "cursor.exe",
   "cursor-agent.exe",
   "CursorSetup.exe",
   // Grok (xAI)
-  "grok.exe",
   "Grok.exe",
   "grok-windows-x86_64.exe",
   "Grok Bot.exe",
@@ -64,23 +62,26 @@ export const AI_SUITE_FORCE_PROXY_PROCESSES = [
   "openai.exe",
   // Claude / Anthropic / Claude Code
   "Claude.exe",
-  "claude.exe",
   "claude-code.exe",
 ];
 
 export const AI_SUITE_FORCE_PROXY_DOMAINS = [
   // Antigravity & Google AI / OAuth2 登录 / 自动更新 CDN（防止被 geosite-cn 误判直连导致更新掉登录）
   "antigravity.google",
+  "ai.google",
+  "labs.google",
+  "notebooklm.google",
+  "deepmind.google",
+  "deepmind.com",
   "googleapis.com",
   "google.com",
   "googleusercontent.com",
   "gstatic.com",
+  "ggpht.com",
   "gvt1.com",
   "gvt2.com",
   "gvt3.com",
   "withgoogle.com",
-  "deepmind.com",
-  "deepmind.google",
   "google.dev",
   "g.co",
   "pki.goog",
@@ -104,18 +105,22 @@ export const AI_SUITE_FORCE_PROXY_DOMAINS = [
   "stytch.com",
   // Grok & xAI / X OAuth 登录
   "grok.com",
+  "grok-sandbox.com",
+  "grokusercontent.com",
   "x.ai",
   "xai.com",
   "x.com",
   "twitter.com",
   "twimg.com",
   "t.co",
-  // ChatGPT / OpenAI / Codex / Sora & 登录认证
+  // ChatGPT / OpenAI / Codex / Sora / 实时语音 WebRTC & 登录认证
   "openai.com",
   "chatgpt.com",
+  "chat.com",
   "oaistatic.com",
   "oaiusercontent.com",
   "sora.com",
+  "livekit.cloud",
   "openaicom.imgix.net",
   "auth0.com",
   "arkoselabs.com",
@@ -128,13 +133,21 @@ export const AI_SUITE_FORCE_PROXY_DOMAINS = [
   "anthropic.com",
   "claudeusercontent.com",
   "clau.de",
-  // 登录人机校验、GitHub OAuth 与 IDE 插件市场（精准限定扩展市场子域，不误伤企业 Azure DevOps）
+  // Microsoft Copilot（防止被 geosite-cn 中的 bing.com @cn 误判直连锁区）
+  "copilot.microsoft.com",
+  "sydney.bing.com",
+  "edgeservices.bing.com",
+  // 登录人机校验、GitHub / Copilot 与 IDE 插件市场（精准限定扩展市场子域，不误伤企业 Azure DevOps）
   "recaptcha.net",
   "hcaptcha.com",
   "challenges.cloudflare.com",
   "github.com",
+  "githubcopilot.com",
   "githubusercontent.com",
   "githubassets.com",
+  "github.io",
+  "ghcr.io",
+  "github.dev",
   "open-vsx.org",
   "marketplace.visualstudio.com",
   "gallerycdn.vsassets.io",
@@ -254,15 +267,37 @@ function normalizeDomainToken(raw: string): string {
 function isValidDomainToken(token: string): boolean {
   return (
     token.length > 0 &&
-    !token.includes(" ") &&
-    !token.includes("/") &&
-    !token.includes(":")
+    /^[a-z0-9._-]+$/i.test(token) &&
+    /[a-z0-9]/i.test(token) &&
+    !token.startsWith("-") &&
+    !token.endsWith("-") &&
+    !token.includes("..")
   );
 }
 
 /**
+ * 将 Windows 进程文件名列表转换为 sing-box v1.14+ 不区分大小写的 `process_path_regex`，
+ * 解决原生 `process_name` 大小写敏感导致用户输入 `wechat.exe` 无法匹配 `WeChat.exe` 的痛点。
+ */
+export function buildProcessPathRegexes(processNames: string[]): string[] {
+  const seen = new Set<string>();
+  const regexes: string[] = [];
+  for (const raw of processNames) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    regexes.push(`(?i)(^|[\\\\/])${escaped}$`);
+  }
+  return regexes;
+}
+
+/**
  * 解析多行自定义规则文本：
- * - 以 `.exe` 结尾（支持完整路径提取文件名）或 `process:` 前缀 -> `process_name`
+ * - 兼容 Clash 逗号规则（`DOMAIN-SUFFIX,xxx`、`DOMAIN,xxx`、`DOMAIN-KEYWORD,xxx`、`IP-CIDR,xxx`、`PROCESS-NAME,xxx`）
+ * - 以 `.exe` 结尾（支持完整路径提取文件名）或 `process:` 前缀 -> `processNames`（按大小写不敏感去重）
  * - IPv4 / IPv6 单 IP 或 CIDR（或 `ip:` / `cidr:` 前缀）-> `ip_cidr`（自动补全 `/32` 或 `/128`）
  * - `full:` / `domain:` 前缀 -> `domain`（精确匹配）
  * - `keyword:` / `domain_keyword:` 前缀 -> `domain_keyword`（关键字匹配）
@@ -273,14 +308,52 @@ export function parseCustomRuleLines(text: string): ParsedCustomRuleGroup {
   const domainSuffixSet = new Set<string>();
   const domainKeywordSet = new Set<string>();
   const ipCidrSet = new Set<string>();
-  const processSet = new Set<string>();
+  const processList: string[] = [];
+  const seenProcessLower = new Set<string>();
+
+  const addProcess = (rawProc: string) => {
+    const parts = rawProc.split(/[\\/]/);
+    const procName = parts[parts.length - 1]?.trim();
+    if (!procName) return;
+    const lower = procName.toLowerCase();
+    if (seenProcessLower.has(lower)) return;
+    seenProcessLower.add(lower);
+    processList.push(procName);
+  };
 
   const lines = text
     .split(/\r?\n/)
-    .map((l) => l.trim())
+    .map((l) => l.trim().replace(/^-\s+/, "").trim())
     .filter((l) => l && !l.startsWith("#") && !l.startsWith("//"));
 
   for (const raw of lines) {
+    // 兼容 Clash 风格逗号规则，如 DOMAIN-SUFFIX,openai.com,Proxy 或 IP-CIDR,1.1.1.1/32,no-resolve
+    const clashMatch = raw.match(
+      /^(DOMAIN-SUFFIX|DOMAIN-KEYWORD|DOMAIN|IP-CIDR6|IP-CIDR|PROCESS-NAME|DST-PORT|SRC-PORT|GEOIP|GEOSITE|MATCH)\s*,\s*([^,]*)(?:,.*)?$/i,
+    );
+    if (clashMatch) {
+      const cKind = clashMatch[1]!.toUpperCase();
+      const cBody = clashMatch[2]!.trim();
+      if (!cBody) continue;
+      if (cKind === "PROCESS-NAME") {
+        addProcess(cBody);
+      } else if (cKind === "IP-CIDR" || cKind === "IP-CIDR6") {
+        const cidr = parseIpOrCidr(cBody);
+        if (cidr && cidr !== "invalid") ipCidrSet.add(cidr);
+      } else if (cKind === "DOMAIN-KEYWORD") {
+        const kw = cBody.toLowerCase();
+        if (kw && !kw.includes(" ") && !kw.includes(",")) domainKeywordSet.add(kw);
+      } else if (cKind === "DOMAIN") {
+        const dom = normalizeDomainToken(cBody);
+        if (isValidDomainToken(dom)) exactDomainSet.add(dom);
+      } else if (cKind === "DOMAIN-SUFFIX") {
+        const dom = normalizeDomainToken(cBody);
+        if (isValidDomainToken(dom)) domainSuffixSet.add(dom);
+      }
+      // 其余不支持的 Clash 规则类型（如 DST-PORT/MATCH）安全忽略，绝不误当作域名后缀
+      continue;
+    }
+
     const prefixMatch = raw.match(
       /^(full|domain|suffix|domain_suffix|keyword|domain_keyword|ip|cidr|ip-cidr|ip_cidr|process):(.+)$/i,
     );
@@ -290,9 +363,7 @@ export function parseCustomRuleLines(text: string): ParsedCustomRuleGroup {
       if (!body) continue;
 
       if (kind === "process") {
-        const parts = body.split(/[\\/]/);
-        const procName = parts[parts.length - 1]?.trim();
-        if (procName) processSet.add(procName);
+        addProcess(body);
         continue;
       }
       if (kind === "ip" || kind === "cidr" || kind === "ip-cidr" || kind === "ip_cidr") {
@@ -302,7 +373,7 @@ export function parseCustomRuleLines(text: string): ParsedCustomRuleGroup {
       }
       if (kind === "keyword" || kind === "domain_keyword") {
         const kw = body.toLowerCase();
-        if (kw && !kw.includes(" ")) domainKeywordSet.add(kw);
+        if (kw && !kw.includes(" ") && !kw.includes(",")) domainKeywordSet.add(kw);
         continue;
       }
       const dom = normalizeDomainToken(body);
@@ -316,11 +387,7 @@ export function parseCustomRuleLines(text: string): ParsedCustomRuleGroup {
     }
 
     if (/\.exe$/i.test(raw)) {
-      const parts = raw.split(/[\\/]/);
-      const exeName = parts[parts.length - 1]?.trim();
-      if (exeName) {
-        processSet.add(exeName);
-      }
+      addProcess(raw);
       continue;
     }
 
@@ -354,7 +421,7 @@ export function parseCustomRuleLines(text: string): ParsedCustomRuleGroup {
     domainSuffixes: Array.from(domainSuffixSet),
     domainKeywords: Array.from(domainKeywordSet),
     ipCidrs: Array.from(ipCidrSet),
-    processNames: Array.from(processSet),
+    processNames: processList,
   };
 }
 
@@ -385,6 +452,17 @@ function buildSingBoxTransport(
       out.max_early_data = transport.maxEarlyData;
       out.early_data_header_name =
         transport.earlyDataHeaderName || "Sec-WebSocket-Protocol";
+    }
+    return out;
+  }
+
+  if (transport.type === "httpupgrade") {
+    const out: Record<string, unknown> = {
+      type: "httpupgrade",
+      path: transport.path || "/",
+    };
+    if (transport.host) {
+      out.host = transport.host;
     }
     return out;
   }
@@ -450,8 +528,8 @@ export function resolveHy2CongestionControl(
 
 export function nodeToSingBoxOutbound(
   node: ProxyNode,
-  defaultBrutalDownMbps = 800,
-  defaultBrutalUpMbps = 100,
+  defaultBrutalDownMbps = 0,
+  defaultBrutalUpMbps = 0,
 ): Record<string, unknown> {
   if (node.protocol === "vless" && node.vless) {
     const v = node.vless;
@@ -634,19 +712,35 @@ export function resolveSelectedOutboundTag(
   return matched ? matched.tag : "auto";
 }
 
+function isRoutableAutoCandidate(server: string): boolean {
+  const h = server.trim().toLowerCase().replace(/^\[(.+)\]$/, "$1");
+  if (!h || h === "localhost" || h === "::1" || h === "0.0.0.0" || h === "::") {
+    return false;
+  }
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * 严格遵循 sing-box v1.14+ 规范合成完整极速版 `running-config.json`
  */
 export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<string, unknown> {
   const mixedPort = input.mixedPort ?? 7890;
   const clashApiPort = input.clashApiPort ?? 9090;
-  const brutalDown = input.brutalDownMbps ?? 800;
-  const brutalUp = input.brutalUpMbps ?? 100;
+  const brutalDown = input.brutalDownMbps ?? 0;
+  const brutalUp = input.brutalUpMbps ?? 0;
 
   const normalizedNodes = ensureUniqueTags(
     omitUnsupportedCertPinNodes(input.nodes),
   );
   const nodeTags = normalizedNodes.map((n) => n.tag);
+  const routableAutoTags = normalizedNodes
+    .filter((n) => isRoutableAutoCandidate(n.server))
+    .map((n) => n.tag);
+  const autoCandidateTags =
+    routableAutoTags.length > 0 ? routableAutoTags : nodeTags;
   const nodeOutbounds = normalizedNodes.map((n) =>
     nodeToSingBoxOutbound(n, brutalDown, brutalUp),
   );
@@ -671,14 +765,14 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
     },
   ];
 
-  if (nodeTags.length > 0) {
-    // 45s 高频轻量保活，防止家用光猫/运营商 CGNAT 回收 UDP 洞口导致跨洋 QUIC 重新握手卡顿
+  if (autoCandidateTags.length > 0) {
+    // 3m 低扰动自动择优，剔除机场顶部 127.0.0.1/0.0.0.0 等流量提示假节点，避免周期性高并发探测制造跳 Ping
     outbounds.push({
       type: "urltest",
       tag: "auto",
-      outbounds: nodeTags,
+      outbounds: autoCandidateTags,
       url: "https://www.gstatic.com/generate_204",
-      interval: "45s",
+      interval: "3m",
       tolerance: 50,
       idle_timeout: "30m",
     });
@@ -690,7 +784,7 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
     tag: "direct",
   });
 
-  // 入站：固定本地 Mixed 端口 + 按需动态注入 LayTun 虚拟网卡
+  // 入站：固定本地 Mixed 端口 + 按需动态注入 LayTun 虚拟网卡（MTU 1480 适配国内 PPPoE 1492 防分片/黑洞）
   const inbounds: Record<string, unknown>[] = [
     {
       type: "mixed",
@@ -706,7 +800,7 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
       tag: "tun-in",
       interface_name: "LayTun",
       address: ["198.18.0.1/30", "fdfe:dcba:9876::1/126"],
-      mtu: 1500,
+      mtu: 1480,
       auto_route: true,
       strict_route: true,
       stack: "system",
@@ -724,19 +818,24 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
     });
   }
 
-  // 解析用户自定义黑白名单（支持域名后缀、精确域名、关键词、IPv4/IPv6 CIDR 与 .exe 进程）
+  // 解析用户自定义黑白名单（支持 Clash 规则、域名后缀、精确域名、关键词、IPv4/IPv6 CIDR 与大小写不敏感 .exe 进程）
   const forceProxy = parseCustomRuleLines(input.forceProxyText);
   const forceDirect = parseCustomRuleLines(input.forceDirectText);
   const aiSuiteProxyEnabled = input.aiSuiteProxyEnabled ?? true;
 
   const forceDirectDomainMatcher = buildDomainMatcherFields(forceDirect);
   const forceProxyDomainMatcher = buildDomainMatcherFields(forceProxy);
+  const forceDirectProcessRegexes = buildProcessPathRegexes(forceDirect.processNames);
+  const forceProxyProcessRegexes = buildProcessPathRegexes(forceProxy.processNames);
+  const aiSuiteProcessRegexes = buildProcessPathRegexes(AI_SUITE_FORCE_PROXY_PROCESSES);
 
   // 多层防污染 DNS 规则（sing-box v1.14+ 标准格式）：
-  // 1) 本机 hosts 内存 0ms 优先命中（让系统代理 / TUN 下 Windows hosts 均生效）
-  // 2) 私有/局域网域名走系统本地 DNS，不泄露到公网 223.5.5.5 / 1.1.1.1
-  // 3) 已知国内 / 海外 / 自定义 / AI 域名直达对应上游
-  // 4) 未知尾部域名：经国内 DNS 探测（1.5s 超时防断网），仅当返回 IP 命中 geoip-cn 时采纳，否则丢弃防污染回退至 dns-remote
+  // 1) 本机 hosts 内存 0ms 优先命中
+  // 2) 私有/局域网域名走系统本地 DNS，不泄露到公网
+  // 3) 全局直连 / 用户「强制直连」始终优先走国内 DNS（即使切到全局代理模式也尊重强制直连白名单）
+  // 4) 用户「强制代理」与 AI 核心域名直达远程防污染 DoH
+  // 5) 国内主流域名走 dns-direct，海外主流域名与 AI 进程兜底走 dns-remote
+  // 6) 未知尾部域名经 500ms 快速国内探测，命中 geoip-cn 采纳，否则防污染回退至 dns-remote
   const dnsRules: Record<string, unknown>[] = [
     {
       action: "evaluate",
@@ -760,16 +859,30 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
       clash_mode: "direct",
       server: "dns-direct",
     },
-    {
-      clash_mode: "global",
-      server: "dns-remote",
-    },
   ];
 
+  if (forceDirectProcessRegexes.length > 0) {
+    dnsRules.push({
+      process_path_regex: forceDirectProcessRegexes,
+      server: "dns-direct",
+    });
+  }
   if (forceDirectDomainMatcher) {
     dnsRules.push({
       ...forceDirectDomainMatcher,
       server: "dns-direct",
+    });
+  }
+
+  dnsRules.push({
+    clash_mode: "global",
+    server: "dns-remote",
+  });
+
+  if (forceProxyProcessRegexes.length > 0) {
+    dnsRules.push({
+      process_path_regex: forceProxyProcessRegexes,
+      server: "dns-remote",
     });
   }
   if (forceProxyDomainMatcher) {
@@ -792,11 +905,17 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
     rule_set: "geosite-geolocation-!cn",
     server: "dns-remote",
   });
+  if (aiSuiteProxyEnabled && aiSuiteProcessRegexes.length > 0) {
+    dnsRules.push({
+      process_path_regex: aiSuiteProcessRegexes,
+      server: "dns-remote",
+    });
+  }
   dnsRules.push({
     action: "evaluate",
     server: "dns-direct",
     tag: "cn-probe",
-    timeout: "1.5s",
+    timeout: "500ms",
   });
   dnsRules.push({
     match_response: "cn-probe",
@@ -804,17 +923,21 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
     action: "respond",
   });
 
-  // 路由规则合成：100ms 极速嗅探 + 本地/内网经 hosts/local 解析后绝对直连
+  // 路由规则合成：30ms 本机极速嗅探 + 回环死锁保护 + 强制直连超越全局代理 + 国内/海外精准分流
   const routeRules: Record<string, unknown>[] = [
     {
       action: "sniff",
-      timeout: "100ms",
+      timeout: "30ms",
     },
     {
       protocol: "dns",
       action: "hijack-dns",
     },
     {
+      ip_cidr: ["127.0.0.0/8", "::1/128"],
+      outbound: "direct",
+    },
+    {
       domain_suffix: PRIVATE_LOCAL_SUFFIXES,
       action: "resolve",
     },
@@ -828,37 +951,18 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
     },
     {
       rule_set: "geosite-private",
-      outbound: "direct",
-    },
-    {
-      ip_is_private: true,
       outbound: "direct",
     },
     {
       clash_mode: "direct",
       outbound: "direct",
     },
-    // TUN 全局代理模式：拦截 UDP 443 HTTP/3 (QUIC)，防止 QUIC-in-QUIC 套娃（直连模式不受影响）
-    ...(input.tunMode
-      ? [
-          {
-            clash_mode: "global",
-            protocol: "quic",
-            port: 443,
-            action: "reject",
-          },
-        ]
-      : []),
-    {
-      clash_mode: "global",
-      outbound: "proxy",
-    },
   ];
 
-  // 用户自定义：强制直连置顶（冲突时始终优先于强制代理与内置规则）
-  if (forceDirect.processNames.length > 0) {
+  // 用户自定义：强制直连置顶（冲突时高于强制代理，且在 Global 全局代理模式下依然保护网银/内网/微信直连）
+  if (forceDirectProcessRegexes.length > 0) {
     routeRules.push({
-      process_name: forceDirect.processNames,
+      process_path_regex: forceDirectProcessRegexes,
       outbound: "direct",
     });
   }
@@ -875,7 +979,98 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
     });
   }
 
-  // TUN 规则分流模式：仅拦截非国内目标的 UDP 443 HTTP/3 (QUIC)，国内直连站点与强制直连流量保留完整 QUIC
+  // 用户自定义显式代理网段（如异地组网 10.8.0.0/16）优先于通用 ip_is_private，其余局域网私网段一律直连
+  if (forceProxy.ipCidrs.length > 0) {
+    if (input.tunMode) {
+      routeRules.push({
+        ip_cidr: forceProxy.ipCidrs,
+        protocol: "quic",
+        port: 443,
+        action: "reject",
+      });
+    }
+    routeRules.push({
+      ip_cidr: forceProxy.ipCidrs,
+      outbound: "proxy",
+    });
+  }
+  routeRules.push({
+    ip_is_private: true,
+    outbound: "direct",
+  });
+
+  // 全局代理模式（已保护回环、局域网与用户强制直连白名单）
+  if (input.tunMode) {
+    routeRules.push({
+      clash_mode: "global",
+      protocol: "quic",
+      port: 443,
+      action: "reject",
+    });
+  }
+  routeRules.push({
+    clash_mode: "global",
+    outbound: "proxy",
+  });
+
+  // 用户自定义：强制代理（含 TUN 下对应流量的 QUIC 防套娃拦截）
+  if (forceProxyProcessRegexes.length > 0) {
+    if (input.tunMode) {
+      routeRules.push({
+        process_path_regex: forceProxyProcessRegexes,
+        protocol: "quic",
+        port: 443,
+        action: "reject",
+      });
+    }
+    routeRules.push({
+      process_path_regex: forceProxyProcessRegexes,
+      outbound: "proxy",
+    });
+  }
+  if (forceProxyDomainMatcher) {
+    if (input.tunMode) {
+      routeRules.push({
+        ...forceProxyDomainMatcher,
+        protocol: "quic",
+        port: 443,
+        action: "reject",
+      });
+    }
+    routeRules.push({
+      ...forceProxyDomainMatcher,
+      outbound: "proxy",
+    });
+  }
+
+  // 内置 AI 核心服务域名优先走代理（位于 geosite-cn 之上，防止带 @cn 标记的认证/CDN 掉登录）
+  if (aiSuiteProxyEnabled) {
+    if (input.tunMode) {
+      routeRules.push({
+        domain_suffix: AI_SUITE_FORCE_PROXY_DOMAINS,
+        protocol: "quic",
+        port: 443,
+        action: "reject",
+      });
+    }
+    routeRules.push({
+      domain_suffix: AI_SUITE_FORCE_PROXY_DOMAINS,
+      outbound: "proxy",
+    });
+  }
+
+  // 五级极速精准分流流水线：
+  // 1) 国内主流域名内存直中 -> 0ms 直连（保留国内 B 站/抖音完整 HTTP/3 QUIC）
+  // 2) TUN 模式下其余非国内 IP 的 UDP 443 QUIC 统一拒绝，促使海外流量零损耗回退 TCP
+  // 3) 海外主流域名内存直中 -> 0ms 透传域名直发远端代理
+  // 4) 纯国内 IP 直中 -> 0ms 直连
+  // 5) AI 套件进程兜底海外未知域名走代理 + BitTorrent P2P 流量强制直连防封号/防跑流
+  // 6) 未收录尾部未知域名 -> 显式 resolve，命中私网 / 国内 IP 走直连，其余走 final: "proxy"
+  routeRules.push({
+    rule_set: "geosite-cn",
+    outbound: "direct",
+  });
+
   if (input.tunMode) {
     routeRules.push({
       type: "logical",
@@ -894,48 +1089,6 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
     });
   }
 
-  // 用户自定义：强制代理置顶
-  if (forceProxy.processNames.length > 0) {
-    routeRules.push({
-      process_name: forceProxy.processNames,
-      outbound: "proxy",
-    });
-  }
-  if (forceProxyDomainMatcher) {
-    routeRules.push({
-      ...forceProxyDomainMatcher,
-      outbound: "proxy",
-    });
-  }
-  if (forceProxy.ipCidrs.length > 0) {
-    routeRules.push({
-      ip_cidr: forceProxy.ipCidrs,
-      outbound: "proxy",
-    });
-  }
-
-  // 可开关内置保护：Antigravity / Cursor / Grok / ChatGPT / Claude 进程与服务域名强制代理（位于 geosite-cn 之上）
-  if (aiSuiteProxyEnabled) {
-    routeRules.push({
-      process_name: AI_SUITE_FORCE_PROXY_PROCESSES,
-      outbound: "proxy",
-    });
-    routeRules.push({
-      domain_suffix: AI_SUITE_FORCE_PROXY_DOMAINS,
-      outbound: "proxy",
-    });
-  }
-
-  // 四级极速精准分流流水线：
-  // 1) 国内主流域名内存直中 -> 0ms 直连
-  // 2) 海外主流域名内存直中 -> 0ms 透传域名直发远端代理（零本地 DNS 阻塞，完整保留节点远端解锁）
-  // 3) 纯国内 IP 直中 -> 0ms 直连
-  // 4) 未收录尾部未知域名 -> 显式 resolve（hosts -> 国内探测 geoip-cn -> 防污染回退 1.1.1.1），
-  //    命中内网 IP / 自定义 CIDR / geoip-cn 走直连，其余走 final: "proxy"
-  routeRules.push({
-    rule_set: "geosite-cn",
-    outbound: "direct",
-  });
   routeRules.push({
     rule_set: "geosite-geolocation-!cn",
     outbound: "proxy",
@@ -944,12 +1097,21 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
     rule_set: "geoip-cn",
     outbound: "direct",
   });
+
+  if (aiSuiteProxyEnabled && aiSuiteProcessRegexes.length > 0) {
+    routeRules.push({
+      process_path_regex: aiSuiteProcessRegexes,
+      outbound: "proxy",
+    });
+  }
+
+  routeRules.push({
+    protocol: "bittorrent",
+    outbound: "direct",
+  });
+
   routeRules.push({
     action: "resolve",
-  });
-  routeRules.push({
-    ip_is_private: true,
-    outbound: "direct",
   });
   if (forceDirect.ipCidrs.length > 0) {
     routeRules.push({
@@ -963,6 +1125,10 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
       outbound: "proxy",
     });
   }
+  routeRules.push({
+    ip_is_private: true,
+    outbound: "direct",
+  });
   routeRules.push({
     rule_set: "geoip-cn",
     outbound: "direct",

@@ -9,11 +9,12 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Search,
   Sparkles,
   Trash2,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { formatRelativeTime } from "../lib/formatters";
 import { resolveHy2CongestionControl } from "../lib/configBuilder";
 import { writeClipboardText } from "../lib/tauriBridge";
@@ -97,6 +98,14 @@ export function NodesView() {
   const [subUrl, setSubUrl] = useState("");
   const [subLoading, setSubLoading] = useState(false);
   const [manualText, setManualText] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  useEffect(() => {
+    if (!confirmClear) return;
+    const timer = setTimeout(() => setConfirmClear(false), 3000);
+    return () => clearTimeout(timer);
+  }, [confirmClear]);
 
   // 节点快速编辑弹窗状态
   const [editingNode, setEditingNode] = useState<ProxyNode | null>(null);
@@ -143,9 +152,21 @@ export function NodesView() {
 
   const displayMap = useMemo(() => getNodeDisplayMap(nodes), [nodes]);
   const autoWinnerDisplay = useMemo(
-    () => resolveNodeDisplayName(nodes, autoWinnerNode),
-    [nodes, autoWinnerNode],
+    () => resolveNodeDisplayName(nodes, autoWinnerNode, displayMap),
+    [nodes, autoWinnerNode, displayMap],
   );
+  const filteredNodes = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return nodes;
+    return nodes.filter((node) => {
+      const label = (displayMap.get(node.id) ?? node.name).toLowerCase();
+      return (
+        label.includes(q) ||
+        node.server.toLowerCase().includes(q) ||
+        node.protocol.toLowerCase().includes(q)
+      );
+    });
+  }, [nodes, searchQuery, displayMap]);
 
   const handleManualImport = async () => {
     const count = await importRawLinks(manualText);
@@ -200,6 +221,28 @@ export function NodesView() {
         </div>
 
         <div className="flex items-center gap-2">
+          {nodes.length > 0 && (
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="筛选节点..."
+                className="w-28 rounded-full bg-white py-2 pl-7.5 pr-6 text-xs text-slate-700 ring-1 ring-black/[0.05] transition focus:w-36 focus:outline-none focus:ring-2 focus:ring-blue-500/35 dark:bg-[#14171F] dark:text-slate-200 dark:ring-white/[0.06]"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-2 top-2.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          )}
+
           <button
             type="button"
             disabled={batchTesting || nodes.length === 0}
@@ -229,11 +272,30 @@ export function NodesView() {
           {nodes.length > 0 && (
             <button
               type="button"
-              onClick={() => void clearAllNodes()}
-              title="清空全部节点"
-              className="flex h-8.5 w-8.5 items-center justify-center rounded-full bg-white text-slate-400 ring-1 ring-black/[0.05] transition hover:bg-rose-50 hover:text-rose-500 active:scale-95 dark:bg-[#14171F] dark:ring-white/[0.06] dark:hover:bg-rose-950/30 cursor-pointer"
+              onClick={() => {
+                if (!confirmClear) {
+                  setConfirmClear(true);
+                  return;
+                }
+                setConfirmClear(false);
+                void clearAllNodes();
+              }}
+              title={
+                confirmClear
+                  ? "再次点击确认清空全部节点与订阅"
+                  : "清空全部节点与订阅"
+              }
+              className={`flex items-center justify-center rounded-full transition active:scale-95 cursor-pointer ${
+                confirmClear
+                  ? "bg-rose-600 px-3 py-2 text-xs font-semibold text-white shadow-xs hover:bg-rose-500"
+                  : "h-8.5 w-8.5 bg-white text-slate-400 ring-1 ring-black/[0.05] hover:bg-rose-50 hover:text-rose-500 dark:bg-[#14171F] dark:ring-white/[0.06] dark:hover:bg-rose-950/30"
+              }`}
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              {confirmClear ? (
+                <span>确认清空</span>
+              ) : (
+                <Trash2 className="h-3.5 w-3.5" />
+              )}
             </button>
           )}
         </div>
@@ -377,9 +439,15 @@ export function NodesView() {
               复制分享链接或订阅后，点击左上角「导入剪贴板」
             </p>
           </div>
+        ) : filteredNodes.length === 0 ? (
+          <div className="flex h-44 flex-col items-center justify-center rounded-[26px] bg-white/60 text-center ring-1 ring-black/[0.03] dark:bg-[#14171F]/50 dark:ring-white/[0.04]">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              未找到匹配「{searchQuery}」的节点
+            </p>
+          </div>
         ) : (
           <div className="grid grid-cols-2 gap-2.5">
-            {nodes.map((node) => {
+            {filteredNodes.map((node) => {
               const badge = getNodeBadge(node);
               const isSelected = selectedOutbound === node.id;
               const displayName = displayMap.get(node.id) ?? node.name;
@@ -463,8 +531,7 @@ export function NodesView() {
                                   : "Brutal 拥塞控制，带宽来自设置页「HY2 默认带宽」"
                               }
                             >
-                              {` · Brutal ↓${cc.downMbps}/↑${cc.upMbps}`}
-                              {cc.source === "global" ? "（默认）" : ""}
+                              {` · ↓${cc.downMbps}/↑${cc.upMbps}M`}
                             </span>
                           ) : (
                             <span title="BBR 自适应拥塞控制">{" · BBR"}</span>
@@ -502,8 +569,9 @@ export function NodesView() {
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        void writeClipboardText(node.rawUri);
-                        pushToast("success", "已复制链接");
+                        void writeClipboardText(node.rawUri)
+                          .then(() => pushToast("success", "已复制链接"))
+                          .catch(() => pushToast("error", "复制链接失败"));
                       }}
                       title="复制链接"
                       className="hidden h-7 w-7 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-700 group-hover:flex dark:hover:bg-white/[0.08] dark:hover:text-slate-200 cursor-pointer"

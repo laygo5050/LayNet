@@ -14,12 +14,12 @@ use tauri_plugin_autostart::MacosLauncher;
 
 use crate::{
     core_manager::{CoreApplyRequest, CoreApplyResult, CoreManager, StopReason},
-    privilege::{is_admin, query_service_installed, request_uac_relaunch, wait_for_parent_exit},
+    privilege::{is_admin, request_uac_relaunch, wait_for_parent_exit},
     proxy::{
         force_disable_system_proxy, get_system_proxy_enabled, get_system_proxy_state,
         set_system_proxy, SystemProxyState,
     },
-    tray::{init_tray, show_main_window, sync_tray, RuntimeSnapshot, TraySyncPayload, APP_QUITTING},
+    tray::{init_tray, show_main_window, sync_tray, TraySyncPayload, APP_QUITTING},
 };
 
 #[cfg(windows)]
@@ -36,7 +36,6 @@ pub struct LaunchContext {
     pub silent: bool,
     pub relaunch_tun: bool,
     pub is_admin: bool,
-    pub service_installed: bool,
     pub sys_proxy_enabled: bool,
     pub preferred_sys_proxy: bool,
     pub core_running: bool,
@@ -77,7 +76,6 @@ fn get_launch_context(
         silent,
         relaunch_tun,
         is_admin: is_admin(),
-        service_installed: query_service_installed(),
         sys_proxy_enabled: get_system_proxy_enabled(),
         preferred_sys_proxy: snap.preferred_sys_proxy,
         core_running: snap.core_running,
@@ -108,17 +106,13 @@ async fn disconnect_laynet_core(
 }
 
 #[tauri::command]
-async fn stop_laynet_core(
-    app: AppHandle,
-    core: tauri::State<'_, CoreManager>,
-) -> Result<(), String> {
-    core.disconnect(&app, false).await;
-    Ok(())
-}
-
-#[tauri::command]
-fn set_sys_proxy(enable: bool, port: Option<u16>) -> Result<(), String> {
-    set_system_proxy(enable, "127.0.0.1", port.unwrap_or(7890))
+async fn set_sys_proxy(enable: bool, port: Option<u16>) -> Result<(), String> {
+    let target_port = port.unwrap_or(7890);
+    tauri::async_runtime::spawn_blocking(move || {
+        set_system_proxy(enable, "127.0.0.1", target_port)
+    })
+    .await
+    .map_err(|e| format!("切换系统代理任务异常: {}", e))?
 }
 
 #[tauri::command]
@@ -172,34 +166,70 @@ fn release_window_to_tray(app: AppHandle) {
 }
 
 /// 纯文本 HTTP 读取通道（仅用于绕过 WebView CORS 拉取远程订阅原始文本，绝不解析节点内容）
+/// 内核连接中优先走本地代理端口拉取被墙订阅，若当前节点全失效则自动回退直连救活订阅；禁用 glob 通配符支持 IPv6/花括号 URL
 #[tauri::command]
-async fn fetch_raw_text(url: String) -> Result<String, String> {
+async fn fetch_raw_text(
+    core: tauri::State<'_, CoreManager>,
+    url: String,
+) -> Result<String, String> {
+    let trimmed = url.trim().to_string();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return Err("仅支持 http:// 或 https:// 订阅地址".to_string());
+    }
+    let use_local_proxy = core.is_running();
+
     tauri::async_runtime::spawn_blocking(move || {
         #[cfg(windows)]
         {
-            let out = std::process::Command::new("curl.exe")
-                .args([
-                    "-sSL",
+            let run_curl = |via_proxy: bool| -> Result<String, String> {
+                let mut cmd = std::process::Command::new("curl.exe");
+                cmd.args([
+                    "-sSLg",
                     "--fail",
+                    "--compressed",
+                    "--connect-timeout",
+                    "6",
                     "--max-time",
-                    "15",
+                    "14",
                     "-A",
                     "LayNet/0.1 (sing-box; clash.meta)",
-                    &url,
-                ])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-                .map_err(|e| format!("调用系统网络请求失败: {}", e))?;
+                ]);
+                if via_proxy {
+                    cmd.args(["-x", "http://127.0.0.1:7890"]);
+                } else {
+                    cmd.args(["--noproxy", "*"]);
+                }
+                cmd.args(["--", &trimmed]);
+                cmd.creation_flags(CREATE_NO_WINDOW);
 
-            if !out.status.success() {
-                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                return Err(format!("订阅拉取失败: {}", err));
+                let out = cmd
+                    .output()
+                    .map_err(|e| format!("调用系统网络请求失败: {}", e))?;
+                if !out.status.success() {
+                    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    return Err(if err.is_empty() {
+                        format!("HTTP 请求返回错误码 {:?}", out.status.code())
+                    } else {
+                        err
+                    });
+                }
+                Ok(String::from_utf8_lossy(&out.stdout).to_string())
+            };
+
+            if use_local_proxy {
+                match run_curl(true) {
+                    Ok(body) => Ok(body),
+                    Err(_proxy_err) => run_curl(false)
+                        .map_err(|direct_err| format!("订阅拉取失败: {}", direct_err)),
+                }
+            } else {
+                run_curl(false).map_err(|e| format!("订阅拉取失败: {}", e))
             }
-            Ok(String::from_utf8_lossy(&out.stdout).to_string())
         }
         #[cfg(not(windows))]
         {
-            let _ = url;
+            let _ = (trimmed, use_local_proxy);
             Err("当前平台未启用原生拉取通道".to_string())
         }
     })
@@ -238,7 +268,6 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .manage(CoreManager::default())
-        .manage(RuntimeSnapshot::default())
         .manage(LaunchFlags {
             silent: AtomicBool::new(is_silent),
             relaunch_tun: AtomicBool::new(is_relaunch_tun),
@@ -269,7 +298,6 @@ pub fn run() {
             get_launch_context,
             apply_core_config,
             disconnect_laynet_core,
-            stop_laynet_core,
             set_sys_proxy,
             get_sys_proxy_state,
             check_admin_privilege,

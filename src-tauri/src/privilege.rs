@@ -1,6 +1,4 @@
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
-#[cfg(windows)]
 use std::ptr::null_mut;
 
 #[cfg(windows)]
@@ -11,10 +9,8 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::SW_SHOWNORMAL,
 };
 
+#[allow(dead_code)]
 pub const SERVICE_NAME: &str = "LayNetService";
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[cfg(windows)]
 fn to_wide(s: &str) -> Vec<u16> {
@@ -30,23 +26,6 @@ pub fn is_admin() -> bool {
     #[cfg(not(windows))]
     {
         true
-    }
-}
-
-/// 检测 Windows 提权辅助服务 `LayNetService` 状态
-pub fn query_service_installed() -> bool {
-    #[cfg(windows)]
-    {
-        std::process::Command::new("sc.exe")
-            .args(["query", SERVICE_NAME])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
-    }
-    #[cfg(not(windows))]
-    {
-        false
     }
 }
 

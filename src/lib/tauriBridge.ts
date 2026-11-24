@@ -26,7 +26,6 @@ export async function getLaunchContext(): Promise<LaunchContext> {
       silent: false,
       relaunchTun: false,
       isAdmin: false,
-      serviceInstalled: false,
       sysProxyEnabled: false,
       preferredSysProxy: true,
       coreRunning: false,
@@ -116,6 +115,7 @@ export async function syncTrayState(payload: {
   tunMode: boolean;
   routingMode: RoutingMode;
   activeNode?: string;
+  terminalShell?: "powershell" | "cmd";
 }): Promise<void> {
   if (!isTauriRuntime()) return;
   try {

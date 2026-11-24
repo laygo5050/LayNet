@@ -37,11 +37,14 @@ import {
   ensureUniqueTags,
   formatCertPinSkipSummary,
   getNodeDisplayMap,
+  makeNodeId,
   makeStableOutboundTag,
   matchSubscriptionNodeIds,
   normalizeMportToSingBox,
   omitUnsupportedCertPinNodes,
   parseShareBatch,
+  rebuildHysteria2RawUri,
+  RESERVED_OUTBOUND_TAGS,
   resolveNodeDisplayName,
   shareUriRequiresUnsupportedCertPin,
   type CertPinSkipEffect,
@@ -68,16 +71,6 @@ import {
 
 export const PERSIST_STORAGE_KEY = "laynet-storage-v1";
 export const PERSIST_SCHEMA_VERSION = 2;
-
-const RESERVED_IDS = new Set([
-  "proxy",
-  "auto",
-  "direct",
-  "dns-hosts",
-  "dns-local",
-  "dns-direct",
-  "dns-remote",
-]);
 
 export interface PersistedAppState {
   nodes: ProxyNode[];
@@ -189,6 +182,7 @@ export interface AppStoreDependencies {
     tunMode: boolean;
     routingMode: RoutingMode;
     activeNode?: string;
+    terminalShell?: "powershell" | "cmd";
   }) => Promise<void>;
   fetchSubscriptionText?: (url: string) => Promise<string>;
   readClipboardText?: () => Promise<string>;
@@ -227,7 +221,6 @@ export interface AppState extends PersistedAppState {
   rulesDirty: boolean;
   autoWinnerNode: string | null;
   isAdmin: boolean;
-  serviceInstalled: boolean;
   autostartEnabled: boolean;
   showTunPrivilegeModal: boolean;
   proxyHijackedBy: string | null;
@@ -280,7 +273,7 @@ export interface AppState extends PersistedAppState {
   ) => Promise<void>;
   sortNodesByLatency: () => void;
   removeNode: (id: string) => Promise<void>;
-  clearAllNodes: () => Promise<void>;
+  clearAllNodes: (keepSubscriptions?: boolean) => Promise<void>;
 
   addSubscription: (name: string, url: string) => Promise<void>;
   refreshSubscription: (id: string, silent?: boolean) => Promise<void>;
@@ -314,23 +307,16 @@ function legacyBrutalUpFor(down: number): number {
   return Math.max(1, Math.round(down * 0.6));
 }
 
-function makeFallbackId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
-  return `node-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
 /**
  * 保留原始 tag，仅规范化节点 ID 唯一性（用于旧版本持久化数据在重排 tag 前精确查找原节点）
  */
 function normalizeNodeIdsPreserveTags(rawNodes: ProxyNode[]): ProxyNode[] {
-  const seen = new Set<string>(RESERVED_IDS);
+  const seen = new Set<string>(RESERVED_OUTBOUND_TAGS);
   return rawNodes.map((node) => {
     let id = typeof node?.id === "string" ? node.id.trim() : "";
     if (!id || seen.has(id)) {
       do {
-        id = makeFallbackId();
+        id = makeNodeId();
       } while (seen.has(id));
     }
     seen.add(id);
@@ -572,7 +558,7 @@ function isSelectionValid(nodes: ProxyNode[], selectedOutbound: string): boolean
 }
 
 function isSameEffectiveNodesAndTags(nodes: ProxyNode[]): boolean {
-  const seen = new Set<string>(RESERVED_IDS);
+  const seen = new Set<string>(RESERVED_OUTBOUND_TAGS);
   for (const n of nodes) {
     if (n.testing) return false;
     if (!n.id || seen.has(n.id)) return false;
@@ -839,7 +825,7 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
       const displayNode =
         s.selectedOutbound === "auto"
           ? s.autoWinnerNode
-            ? `auto → ${resolveNodeDisplayName(s.nodes, s.autoWinnerNode) ?? s.autoWinnerNode}`
+            ? `auto → ${resolveNodeDisplayName(s.nodes, s.autoWinnerNode, displayMap) ?? s.autoWinnerNode}`
             : "auto"
           : s.selectedOutbound === "direct"
             ? "direct"
@@ -851,6 +837,7 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
         tunMode: s.connected && s.tunMode,
         routingMode: s.routingMode,
         activeNode: displayNode,
+        terminalShell: s.terminalShell,
       });
     };
 
@@ -904,7 +891,7 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
           );
       });
 
-      const refreshWinnerAndGuard = async () => {
+      const refreshWinnerAndGuard = async (periodicTick = false) => {
         const st = get();
         if (!st.connected || !st.windowVisible) return;
 
@@ -914,7 +901,27 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
           syncTray();
         }
 
-        if (st.sysProxy && !st.tunMode) {
+        // 在控制台可见且未常开 /connections WS 时，按 4s 节拍同步一次活跃连接快照，避免控制台连接数冻结为 0
+        if (periodicTick) {
+          const cur = get();
+          const liveConnWs =
+            cur.activeTab === "settings" && cur.settingsSubTab === "connections";
+          if (cur.connected && cur.windowVisible && !liveConnWs && cur.activeTab === "dashboard") {
+            const snap = await resolveDeps.fetchConnectionsSnapshot();
+            if (snap && get().connected) {
+              telemetryStore
+                .getState()
+                .applyConnectionsSnapshot(
+                  snap.connections,
+                  snap.uploadTotal,
+                  snap.downloadTotal,
+                );
+            }
+          }
+        }
+
+        const latest = get();
+        if (latest.sysProxy && !latest.tunMode) {
           const reg = await resolveDeps.getSysProxyState();
           let hijacked: string | null = null;
           if (!reg.enabled) {
@@ -930,9 +937,9 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
         }
       };
 
-      void refreshWinnerAndGuard();
+      void refreshWinnerAndGuard(false);
       autoWinnerTimer = setInterval(() => {
-        void refreshWinnerAndGuard();
+        void refreshWinnerAndGuard(true);
       }, 4000);
     };
 
@@ -947,7 +954,7 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
       )
         ? state.selectedOutbound
         : "auto";
-      const brutalDown = state.brutalDownMbps ?? 800;
+      const brutalDown = state.brutalDownMbps ?? 0;
       const brutalUp = state.brutalUpMbps ?? legacyBrutalUpFor(brutalDown);
       const configObj = buildSingBoxConfig({
         nodes: normalizedNodes,
@@ -964,7 +971,7 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
       const activeNodeDisplay =
         validSelection === "auto"
           ? get().autoWinnerNode
-            ? `auto → ${resolveNodeDisplayName(normalizedNodes, get().autoWinnerNode) ?? get().autoWinnerNode}`
+            ? `auto → ${resolveNodeDisplayName(normalizedNodes, get().autoWinnerNode, displayMap) ?? get().autoWinnerNode}`
             : "auto"
           : validSelection === "direct"
             ? "direct"
@@ -1269,8 +1276,8 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
       aiSuiteProxyEnabled: true,
       theme: "system",
       terminalShell: "powershell",
-      brutalDownMbps: 800,
-      brutalUpMbps: 100,
+      brutalDownMbps: 0,
+      brutalUpMbps: 0,
       autoRestoreConnect: true,
       autoRefreshSubs: true,
       lastConnected: false,
@@ -1285,7 +1292,6 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
       rulesDirty: false,
       autoWinnerNode: null,
       isAdmin: false,
-      serviceInstalled: false,
       autostartEnabled: false,
       showTunPrivilegeModal: false,
       proxyHijackedBy: null,
@@ -1306,7 +1312,10 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
         syncTelemetryStreams();
       },
       setTheme: (theme) => set({ theme }),
-      setTerminalShell: (terminalShell) => set({ terminalShell }),
+      setTerminalShell: (terminalShell) => {
+        set({ terminalShell });
+        syncTray();
+      },
 
       pushToast: (type, message) => {
         const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1373,7 +1382,6 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
 
         set({
           isAdmin: ctx.isAdmin,
-          serviceInstalled: ctx.serviceInstalled,
           autostartEnabled: autostart,
         });
 
@@ -1421,10 +1429,20 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
         const unlistenStdio = await resolveDeps.subscribeTauriEvent<string>(
           "core-stdio",
           (line) => {
-            const now = new Date().toTimeString().slice(0, 8);
             const lower = line.toLowerCase();
+            const isFatal = lower.includes("fatal");
+            const st = get();
+            const liveLogWs =
+              st.connected &&
+              st.windowVisible &&
+              st.activeTab === "settings" &&
+              st.settingsSubTab === "logs";
+            // 当 /logs WebSocket 已激活时，跳过非致命 stdio 行，防止同一条内核日志重复渲染两遍
+            if (liveLogWs && !isFatal) return;
+
+            const now = new Date().toTimeString().slice(0, 8);
             const type: CoreLogEntry["type"] =
-              lower.includes("error") || lower.includes("fatal")
+              lower.includes("error") || isFatal
                 ? "error"
                 : lower.includes("warn")
                   ? "warning"
@@ -1808,19 +1826,41 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
       },
 
       toggleSysProxy: async () => {
-        const next = !get().sysProxy;
-        set({ sysProxy: next, proxyHijackedBy: null });
-        if (!get().tunMode) {
-          set({ sysProxyBeforeTun: next });
+        const cur = get();
+        // TUN 模式激活时开启系统代理：自动关闭 TUN 并切回系统代理模式，杜绝双栈套娃与托盘状态冲突
+        if (cur.tunMode) {
+          set({
+            tunMode: false,
+            sysProxy: true,
+            sysProxyBeforeTun: true,
+            proxyHijackedBy: null,
+          });
+          if (get().connected) {
+            const status = await get().reloadCoreConfig(true);
+            if (status === "applied") {
+              get().pushToast(
+                "success",
+                "已关闭 TUN 并切换为系统代理 (127.0.0.1:7890)",
+              );
+            }
+          } else {
+            syncTray();
+          }
+          return;
         }
+
+        const next = !cur.sysProxy;
+        set({
+          sysProxy: next,
+          sysProxyBeforeTun: next,
+          proxyHijackedBy: null,
+        });
         if (get().connected) {
           try {
             await resolveDeps.setWindowsSystemProxy(next, 7890);
             if (lastEffectiveSnapshot) {
               lastEffectiveSnapshot.sysProxy = next;
-              if (!get().tunMode) {
-                lastEffectiveSnapshot.sysProxyBeforeTun = next;
-              }
+              lastEffectiveSnapshot.sysProxyBeforeTun = next;
             }
             syncTray();
             get().pushToast(
@@ -1828,7 +1868,7 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
               next ? "系统代理已开启 (127.0.0.1:7890)" : "系统代理已关闭",
             );
           } catch (err) {
-            set({ sysProxy: !next });
+            set({ sysProxy: !next, sysProxyBeforeTun: !next });
             const msg = err instanceof Error ? err.message : String(err);
             get().pushToast("error", msg);
           }
@@ -1997,6 +2037,10 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
 
       applyCustomRules: async () => {
         if (get().connected) {
+          if (!get().rulesDirty) {
+            get().pushToast("info", "分流规则未发生变更");
+            return true;
+          }
           const status = await get().reloadCoreConfig(true);
           if (status === "applied") {
             get().pushToast("success", "自定义黑白名单规则已置顶注入并生效");
@@ -2081,15 +2125,15 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
         const prevTarget = get().nodes.find((n) => n.id === id);
         if (!prevTarget) return;
 
+        const wasConnected = get().connected;
+        const beforeConfigJson = wasConnected
+          ? buildConfigPayload(get()).configJson
+          : "";
+
         const cleanName = patch.name.trim() || prevTarget.name;
         const updatedList = get().nodes.map((node) => {
           if (node.id !== id) return node;
           const nextNode = { ...node, name: cleanName };
-
-          const hashIdx = nextNode.rawUri.indexOf("#");
-          const baseUri =
-            hashIdx === -1 ? nextNode.rawUri : nextNode.rawUri.slice(0, hashIdx);
-          let nextRawUri = `${baseUri}#${encodeURIComponent(cleanName)}`;
 
           if (node.protocol === "hysteria2" && node.hysteria2) {
             const serverPorts =
@@ -2108,38 +2152,35 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
               serverPorts:
                 serverPorts && serverPorts.length > 0 ? serverPorts : undefined,
             };
-
-            const qIdx = baseUri.indexOf("?");
-            const uriPrefix = qIdx === -1 ? baseUri : baseUri.slice(0, qIdx);
-            const params = new URLSearchParams(
-              qIdx === -1 ? "" : baseUri.slice(qIdx + 1),
-            );
-            if (patch.mport && patch.mport.trim()) {
-              params.set("mport", patch.mport.trim());
-            } else {
-              params.delete("mport");
-            }
-            if (downMbps) {
-              params.set("downmbps", String(downMbps));
-            } else {
-              params.delete("downmbps");
-            }
-            if (upMbps) {
-              params.set("upmbps", String(upMbps));
-            } else {
-              params.delete("upmbps");
-            }
-            const qs = params.toString();
-            nextRawUri = `${uriPrefix}${qs ? `?${qs}` : ""}#${encodeURIComponent(cleanName)}`;
+            nextNode.rawUri = rebuildHysteria2RawUri(node, {
+              name: cleanName,
+              mport: patch.mport,
+              downMbps,
+              upMbps,
+            });
+          } else {
+            const hashIdx = nextNode.rawUri.indexOf("#");
+            const baseUri =
+              hashIdx === -1 ? nextNode.rawUri : nextNode.rawUri.slice(0, hashIdx);
+            nextNode.rawUri = `${baseUri}#${encodeURIComponent(cleanName)}`;
           }
 
-          nextNode.rawUri = nextRawUri;
           return nextNode;
         });
 
         const normalized = ensureUniqueTags(updatedList);
         set({ nodes: normalized });
-        if (get().connected) {
+        if (wasConnected) {
+          const afterConfigJson = buildConfigPayload(get()).configJson;
+          // 仅修改节点显示名称时，底层 outbound 配置零变化，无需杀进程重启内核断流
+          if (afterConfigJson === beforeConfigJson) {
+            if (lastEffectiveSnapshot) {
+              lastEffectiveSnapshot.nodes = normalized;
+            }
+            syncTray();
+            get().pushToast("success", "节点名称已更新");
+            return;
+          }
           const status = await get().reloadCoreConfig(true);
           if (status === "applied") {
             get().pushToast("success", "节点参数已保存并重载生效");
@@ -2184,7 +2225,35 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
         }
       },
 
-      clearAllNodes: async () => {
+      clearAllNodes: async (keepSubscriptions = false) => {
+        if (keepSubscriptions) {
+          const subNodeIds = new Set(
+            get()
+              .nodes.filter((n) => Boolean(n.subscriptionId))
+              .map((n) => n.id),
+          );
+          const remaining = ensureUniqueTags(
+            get().nodes.filter((n) => subNodeIds.has(n.id)),
+          );
+          const nextSelected = isSelectionValid(
+            remaining,
+            get().selectedOutbound,
+          )
+            ? get().selectedOutbound
+            : "auto";
+          set({ nodes: remaining, selectedOutbound: nextSelected });
+          if (get().connected) {
+            if (remaining.length === 0) {
+              await get().disconnectCore();
+            } else {
+              await get().reloadCoreConfig(true);
+            }
+          } else {
+            syncTray();
+          }
+          get().pushToast("info", "已清空手动导入节点（订阅已保留）");
+          return;
+        }
         set({ nodes: [], subscriptions: [], selectedOutbound: "auto" });
         if (get().connected) {
           await get().disconnectCore();
@@ -2200,7 +2269,7 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
           get().pushToast("error", "请输入合法的 http:// 或 https:// 订阅地址");
           return;
         }
-        const subId = `sub-${makeFallbackId()}`;
+        const subId = `sub-${makeNodeId()}`;
         const label =
           name.trim() ||
           (() => {

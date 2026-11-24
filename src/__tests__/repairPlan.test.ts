@@ -85,6 +85,7 @@ interface TestHarness {
     tunMode: boolean;
     routingMode: RoutingMode;
     activeNode?: string;
+    terminalShell?: "powershell" | "cmd";
   }>;
   proxyCalls: Array<{ enable: boolean; port: number }>;
   clashSwitches: Array<{ targetTag: string; selectorGroup?: string }>;
@@ -131,7 +132,6 @@ function createHarness(
     silent: false,
     relaunchTun: false,
     isAdmin: true,
-    serviceInstalled: false,
     sysProxyEnabled: false,
     preferredSysProxy: true,
     coreRunning: false,
@@ -281,7 +281,9 @@ test("Item 2: core-exited updates UI/telemetry and preserves user sysProxy prefe
   const app = createAppStore(h.deps);
   try {
     await app.useStore.getState().initializeApp();
-    await app.useStore.getState().importRawLinks("trojan://demo@a.example:443#HK");
+    await app.useStore
+      .getState()
+      .importRawLinks("hy2://secret@a.example:443#HK");
     await app.useStore.getState().connectCore();
     assert.equal(app.useStore.getState().connected, true);
     assert.equal(app.useStore.getState().sysProxy, true);
@@ -355,7 +357,9 @@ test("Item 3: precheck failure and rollback failure protect callers from false s
   const app = createAppStore(h.deps);
   try {
     await app.useStore.getState().initializeApp();
-    await app.useStore.getState().importRawLinks("trojan://demo@a.example:443#HK");
+    await app.useStore
+      .getState()
+      .importRawLinks("hy2://secret@a.example:443#HK");
     await app.useStore.getState().connectCore();
     assert.equal(app.useStore.getState().connected, true);
     assert.equal(app.useStore.getState().tunMode, false);
@@ -407,7 +411,7 @@ test("Item 3: precheck failure and rollback failure protect callers from false s
       /TUN 模式已开启/,
     );
 
-    // 3. 节点编辑时若候选和回滚均失败 -> 转断开状态、保留阶段错误、回退节点参数
+    // 3. 节点连接参数编辑时若候选和回滚均失败 -> 转断开状态、保留阶段错误、回退节点参数
     const nodeId = app.useStore.getState().nodes[0].id;
     h.setApplyHandler(() => ({
       status: "failed",
@@ -420,9 +424,13 @@ test("Item 3: precheck failure and rollback failure protect callers from false s
 
     await app.useStore
       .getState()
-      .updateNodeConfig(nodeId, { name: "Broken-Name" });
+      .updateNodeConfig(nodeId, { name: "Broken-Name", mport: "30000-40000" });
     assert.equal(app.useStore.getState().connected, false);
     assert.equal(app.useStore.getState().nodes[0].name, "HK");
+    assert.equal(
+      app.useStore.getState().nodes[0].hysteria2?.serverPorts,
+      undefined,
+    );
     assert.equal(app.useStore.getState().toasts.at(-1)?.type, "error");
     assert.match(app.useStore.getState().toasts.at(-1)?.message ?? "", /启动失败/);
     assert.match(app.useStore.getState().toasts.at(-1)?.message ?? "", /回滚失败/);
@@ -436,7 +444,9 @@ test("Item 3: concurrent reload cancelled by disconnect never re-enables connect
   const app = createAppStore(h.deps);
   try {
     await app.useStore.getState().initializeApp();
-    await app.useStore.getState().importRawLinks("trojan://demo@a.example:443#HK");
+    await app.useStore
+      .getState()
+      .importRawLinks("hy2://secret@a.example:443#HK");
     await app.useStore.getState().connectCore();
     assert.equal(app.useStore.getState().connected, true);
 
@@ -982,7 +992,7 @@ test("Bugfix 1: hysteria2 pinSHA256 is skipped while ordinary nodes stay usable"
     );
     assert.equal(
       outbounds.find((outbound) => outbound.tag === "auto")?.interval,
-      "45s",
+      "3m",
     );
     assert.equal(
       outbounds.find((outbound) => outbound.tag === "proxy")?.default,
@@ -1721,4 +1731,140 @@ test("HY2 bandwidth: legacy persisted tier derives upload; explicit custom uploa
   );
   assert.equal(custom.brutalDownMbps, 90);
   assert.equal(custom.brutalUpMbps, 60);
+});
+
+test("Five-dimension overhaul: protocol parser edge cases (httpupgrade, gun, ss %3D, slash password, unsupported transport)", () => {
+  // 1. VLESS httpupgrade maps to native type: "httpupgrade", never "ws"
+  const vlessHu = parseSingleShareUri(
+    "vless://11111111-1111-1111-1111-111111111111@hu.example:443?security=tls&type=httpupgrade&host=cdn.hu.example&path=%2Fup%3Fed%3D2048#HU-Node",
+  );
+  assert.ok(vlessHu);
+  assert.equal(vlessHu.vless?.transport?.type, "httpupgrade");
+  assert.equal(vlessHu.vless?.transport?.path, "/up");
+  assert.equal(vlessHu.vless?.transport?.host, "cdn.hu.example");
+
+  const cfgHu = buildSingBoxConfig({
+    nodes: [vlessHu],
+    selectedOutbound: vlessHu.id,
+    routingMode: "rule",
+    tunMode: false,
+    forceProxyText: "",
+    forceDirectText: "",
+  });
+  const huOut = (cfgHu.outbounds as Array<Record<string, unknown>>).find(
+    (o) => o.tag === vlessHu.tag,
+  )!;
+  assert.deepEqual(huOut.transport, {
+    type: "httpupgrade",
+    path: "/up",
+    host: "cdn.hu.example",
+  });
+
+  // 2. type=gun maps to grpc
+  const trojanGun = parseSingleShareUri(
+    "trojan://secret@grpc.example:443?type=gun&serviceName=my-gun-svc#GunNode",
+  );
+  assert.ok(trojanGun);
+  assert.equal(trojanGun.trojan?.transport?.type, "grpc");
+  assert.equal(trojanGun.trojan?.transport?.serviceName, "my-gun-svc");
+
+  // 3. Unsupported transports (xhttp / kcp) are rejected rather than silently downgraded to broken TCP
+  assert.equal(
+    parseSingleShareUri(
+      "vless://11111111-1111-1111-1111-111111111111@x.example:443?security=tls&type=xhttp&path=/x#BadXhttp",
+    ),
+    null,
+  );
+  assert.equal(
+    parseSingleShareUri("trojan://pw@k.example:443?type=kcp#BadKcp"),
+    null,
+  );
+
+  // 4. Shadowsocks SIP002 with URL-encoded Base64 padding (%3D%3D) & legacy encoded Base64
+  const rawCred = btoa("aes-256-gcm:p@ss:w0rd!"); // ends with ==
+  const encodedCred = encodeURIComponent(rawCred);
+  assert.match(encodedCred, /%3D/i);
+  const ssSip002 = parseSingleShareUri(
+    `ss://${encodedCred}@ss.example:8388#SS-Encoded`,
+  );
+  assert.ok(ssSip002);
+  assert.equal(ssSip002.shadowsocks?.method, "aes-256-gcm");
+  assert.equal(ssSip002.shadowsocks?.password, "p@ss:w0rd!");
+  assert.equal(ssSip002.server, "ss.example");
+  assert.equal(ssSip002.serverPort, 8388);
+
+  // 5. Hysteria2 / Trojan password containing raw '/' does not truncate @host:port
+  const hy2Slash = parseSingleShareUri(
+    "hy2://base64/key+with/slashes@hy2.slash.example:8443/?sni=hy2.slash.example#SlashPW",
+  );
+  assert.ok(hy2Slash);
+  assert.equal(hy2Slash.server, "hy2.slash.example");
+  assert.equal(hy2Slash.serverPort, 8443);
+  assert.equal(hy2Slash.hysteria2?.password, "base64/key+with/slashes");
+});
+
+test("Five-dimension overhaul: rename skips core restart, HY2 inline mport edit cleans rawUri, and TUN/SysProxy stay mutually exclusive", async () => {
+  const h = createHarness();
+  const app = createAppStore(h.deps);
+  try {
+    await app.useStore.getState().initializeApp();
+
+    // Fresh store defaults to BBR (0 / 0) for undeclared HY2 nodes
+    assert.equal(app.useStore.getState().brutalDownMbps, 0);
+    assert.equal(app.useStore.getState().brutalUpMbps, 0);
+
+    await app.useStore
+      .getState()
+      .importRawLinks("hy2://pw@1.2.3.4:20000-40000?sni=a.example#HY2-Hop");
+    await app.useStore.getState().connectCore();
+    assert.equal(app.useStore.getState().connected, true);
+
+    const node0 = app.useStore.getState().nodes[0]!;
+    assert.deepEqual(node0.hysteria2?.serverPorts, ["20000:40000"]);
+    h.applyCalls.length = 0;
+
+    // 1. Display-only rename triggers ZERO reloadCoreConfig (0 applyCalls) while updating tray
+    await app.useStore.getState().selectOutbound(node0.id);
+    await app.useStore.getState().updateNodeConfig(node0.id, {
+      name: "HK-NoRestart",
+      mport: "20000-40000",
+    });
+    assert.equal(h.applyCalls.length, 0);
+    assert.equal(app.useStore.getState().nodes[0]?.name, "HK-NoRestart");
+    assert.equal(h.trayUpdates.at(-1)?.activeNode, "HK-NoRestart");
+
+    // 2. Clearing inline mport removes :20000-40000 from rawUri authority and reloads once
+    await app.useStore.getState().updateNodeConfig(node0.id, {
+      name: "HK-SinglePort",
+      mport: "",
+    });
+    assert.equal(h.applyCalls.length, 1);
+    const updated = app.useStore.getState().nodes[0]!;
+    assert.equal(updated.hysteria2?.serverPorts, undefined);
+    assert.doesNotMatch(updated.rawUri, /20000-40000/);
+    assert.match(updated.rawUri, /1\.2\.3\.4:20000/);
+
+    // 3. Enabling TUN disables SysProxy; clicking SysProxy while in TUN cleanly turns off TUN
+    await app.useStore.getState().toggleTunMode();
+    assert.equal(app.useStore.getState().tunMode, true);
+    assert.equal(app.useStore.getState().sysProxy, false);
+
+    await app.useStore.getState().toggleSysProxy();
+    assert.equal(app.useStore.getState().tunMode, false);
+    assert.equal(app.useStore.getState().sysProxy, true);
+
+    // 4. Switching terminal shell syncs to Tray; duplicate non-fatal core-stdio suppressed when /logs WS active
+    app.useStore.getState().setTerminalShell("cmd");
+    assert.equal(h.trayUpdates.at(-1)?.terminalShell, "cmd");
+
+    app.useStore.getState().setActiveTab("settings");
+    app.useStore.getState().setSettingsSubTab("logs");
+    app.useStore.getState().clearLogs();
+    h.emitEvent("core-stdio", "WARN duplicate line from stdio");
+    assert.equal(app.telemetryStore.getState().logs.length, 0);
+    h.emitEvent("core-stdio", "FATAL unrecoverable panic");
+    assert.equal(app.telemetryStore.getState().logs.length, 1);
+  } finally {
+    app.dispose();
+  }
 });

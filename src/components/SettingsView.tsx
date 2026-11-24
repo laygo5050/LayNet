@@ -7,20 +7,20 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { extractProcessName, formatBytes } from "../lib/formatters";
-import { resolveNodeDisplayName } from "../lib/uriParser";
+import { getNodeDisplayMap, resolveNodeDisplayName } from "../lib/uriParser";
 import { useAppStore } from "../store/useAppStore";
 import { useTelemetryStore } from "../store/useTelemetryStore";
 
 const BRUTAL_PRESETS = [
-  { label: "300M", down: 300, up: 60, title: "Brutal ↓300 / ↑60 Mbps" },
-  { label: "800M", down: 800, up: 100, title: "Brutal ↓800 / ↑100 Mbps" },
-  { label: "1000M", down: 1000, up: 100, title: "Brutal ↓1000 / ↑100 Mbps" },
   {
     label: "BBR",
     down: 0,
     up: 0,
-    title: "BBR 自适应拥塞控制：遇丢包会主动降速，跨境丢包线路上可能很慢",
+    title: "BBR 自适应拥塞控制（推荐默认）：自动适配物理带宽，不抢占光猫上行队列",
   },
+  { label: "200M", down: 200, up: 30, title: "Brutal ↓200 / ↑30 Mbps（适配 200M~300M 家宽）" },
+  { label: "500M", down: 500, up: 50, title: "Brutal ↓500 / ↑50 Mbps（适配 500M~1000M 家宽）" },
+  { label: "1000M", down: 1000, up: 100, title: "Brutal ↓1000 / ↑100 Mbps（适配千兆对称/专线）" },
 ] as const;
 
 export function SettingsView() {
@@ -62,6 +62,8 @@ export function SettingsView() {
     "all",
   );
 
+  const displayMap = useMemo(() => getNodeDisplayMap(nodes), [nodes]);
+
   const filteredConnections = useMemo(() => {
     const q = filterText.trim().toLowerCase();
     if (!q) return connections;
@@ -77,7 +79,7 @@ export function SettingsView() {
       ).toLowerCase();
       const rule = `${c.rule} ${c.rulePayload}`.toLowerCase();
       const chainLabels = c.chains
-        .map((ch) => resolveNodeDisplayName(nodes, ch) ?? ch)
+        .map((ch) => resolveNodeDisplayName(nodes, ch, displayMap) ?? ch)
         .join(" ")
         .toLowerCase();
       const rawChain = c.chains.join(" ").toLowerCase();
@@ -89,7 +91,7 @@ export function SettingsView() {
         rawChain.includes(q)
       );
     });
-  }, [connections, filterText, nodes]);
+  }, [connections, filterText, nodes, displayMap]);
 
   const filteredLogs = useMemo(() => {
     const q = filterText.trim().toLowerCase();
@@ -128,10 +130,11 @@ export function SettingsView() {
         <button
           type="button"
           onClick={() => setAutoRestoreConnect(!autoRestoreConnect)}
+          title="打开软件或开机静默启动时，自动恢复上次的连接状态"
           className="flex items-center justify-between rounded-[22px] bg-white px-4 py-3 text-left ring-1 ring-black/[0.04] transition hover:ring-black/[0.08] active:scale-[0.99] dark:bg-[#14171F] dark:ring-white/[0.06] cursor-pointer"
         >
           <span className="text-xs font-semibold text-slate-800 dark:text-slate-100">
-            自动重连
+            启动自连
           </span>
           <div
             className={`h-5 w-9 rounded-full p-0.5 transition-colors ${
@@ -399,7 +402,8 @@ export function SettingsView() {
                   const target = `${host}:${conn.metadata.destinationPort}`;
                   const rawOutbound = conn.chains[0] || "direct";
                   const finalOutbound =
-                    resolveNodeDisplayName(nodes, rawOutbound) ?? rawOutbound;
+                    resolveNodeDisplayName(nodes, rawOutbound, displayMap) ??
+                    rawOutbound;
                   const isDirect =
                     rawOutbound.toLowerCase() === "direct" ||
                     conn.chains.some((c) => c.toLowerCase() === "direct");

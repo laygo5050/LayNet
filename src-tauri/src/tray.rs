@@ -1,9 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Mutex,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -33,6 +30,8 @@ pub struct TraySyncPayload {
     pub tun_mode: bool,
     pub routing_mode: String,
     pub active_node: Option<String>,
+    #[serde(default)]
+    pub terminal_shell: Option<String>,
 }
 
 impl Default for TraySyncPayload {
@@ -43,19 +42,7 @@ impl Default for TraySyncPayload {
             tun_mode: false,
             routing_mode: "rule".to_string(),
             active_node: None,
-        }
-    }
-}
-
-/// 驻留在 Rust 内存中的最新状态镜像（供 WebView2 销毁后托盘菜单原地操作 & 窗口重建时秒级同步）
-pub struct RuntimeSnapshot {
-    pub state: Mutex<TraySyncPayload>,
-}
-
-impl Default for RuntimeSnapshot {
-    fn default() -> Self {
-        Self {
-            state: Mutex::new(TraySyncPayload::default()),
+            terminal_shell: None,
         }
     }
 }
@@ -120,8 +107,12 @@ fn build_tray_icon(kind: TrayBadgeKind) -> Image<'static> {
     Image::new_owned(rgba, size as u32, size as u32)
 }
 
-pub fn terminal_proxy_command() -> &'static str {
-    "$env:HTTP_PROXY=\"http://127.0.0.1:7890\"; $env:HTTPS_PROXY=\"http://127.0.0.1:7890\"; $env:ALL_PROXY=\"socks5://127.0.0.1:7890\""
+pub fn terminal_proxy_command_for(shell: Option<&str>) -> &'static str {
+    if matches!(shell, Some(s) if s.eq_ignore_ascii_case("cmd")) {
+        "set HTTP_PROXY=http://127.0.0.1:7890&& set HTTPS_PROXY=http://127.0.0.1:7890&& set ALL_PROXY=socks5://127.0.0.1:7890"
+    } else {
+        "$env:HTTP_PROXY=\"http://127.0.0.1:7890\"; $env:HTTPS_PROXY=\"http://127.0.0.1:7890\"; $env:ALL_PROXY=\"socks5://127.0.0.1:7890\""
+    }
 }
 
 /// 零依赖极速本地 PATCH Clash API `/configs`（用于 WebView2 销毁状态下直接热切换规则/全局/直连模式）
@@ -315,6 +306,13 @@ fn handle_tray_action(app: &AppHandle, action: &str) {
             }
         }
         "toggle-sysproxy" => {
+            let core = app.state::<CoreManager>();
+            let snap = core.get_snapshot();
+            // 未连接或处于 TUN 模式时需重合成配置或明确状态，唤起主面板统一处理，杜绝双栈冲突或盲切
+            if !core.is_running() || snap.tun_mode {
+                show_main_window(app);
+                return;
+            }
             let app = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 let core = app.state::<CoreManager>();
@@ -326,11 +324,14 @@ fn handle_tray_action(app: &AppHandle, action: &str) {
             });
         }
         "mode-rule" | "mode-global" | "mode-direct" => {
-            let mode = action.strip_prefix("mode-").unwrap_or("rule");
-            let core = app.state::<CoreManager>();
-            if !core.is_running() || patch_clash_mode_headless(mode) {
-                core.update_headless_routing_mode(app, mode);
-            }
+            let mode = action.strip_prefix("mode-").unwrap_or("rule").to_string();
+            let app = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let core = app.state::<CoreManager>();
+                if !core.is_running() || patch_clash_mode_headless(&mode) {
+                    core.update_headless_routing_mode(&app, &mode);
+                }
+            });
         }
         "toggle-tun" => {
             // TUN 开关可能涉及管理员提权引导与配置重合成，唤起主面板处理
@@ -357,7 +358,12 @@ pub fn init_tray(app: &AppHandle) -> tauri::Result<()> {
                     show_main_window(app);
                 }
                 "copy-terminal-proxy" => {
-                    let _ = app.clipboard().write_text(terminal_proxy_command());
+                    let shell = app
+                        .try_state::<CoreManager>()
+                        .and_then(|c| c.get_snapshot().terminal_shell);
+                    let _ = app
+                        .clipboard()
+                        .write_text(terminal_proxy_command_for(shell.as_deref()));
                     if app.get_webview_window("main").is_some() {
                         let _ = app.emit("tray-action", "copied-terminal-proxy");
                     }
@@ -391,12 +397,6 @@ pub fn init_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 pub fn sync_tray_visuals(app: &AppHandle, payload: &TraySyncPayload) -> Result<(), String> {
-    if let Some(snapshot) = app.try_state::<RuntimeSnapshot>() {
-        if let Ok(mut guard) = snapshot.state.lock() {
-            *guard = payload.clone();
-        }
-    }
-
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return Ok(());
     };

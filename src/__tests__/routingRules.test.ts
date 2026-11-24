@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   AI_SUITE_FORCE_PROXY_DOMAINS,
   AI_SUITE_FORCE_PROXY_PROCESSES,
+  buildProcessPathRegexes,
   buildSingBoxConfig,
   countCustomRules,
   parseCustomRuleLines,
@@ -30,16 +31,24 @@ test("parseCustomRuleLines parses domains, prefixes, IPv4/IPv6 CIDR, and process
     https://[2001:db8::1]/path
     C:\\Program Files\\Cursor\\Cursor.exe
     process:WeChat.exe
+    process:wechat.exe
+    - DOMAIN-SUFFIX,claude.ai,Proxy
+    DOMAIN,exact.clash.test
+    DOMAIN-KEYWORD,clash-kw
+    IP-CIDR,1.0.0.1/32,no-resolve
+    PROCESS-NAME,Telegram.exe
+    DST-PORT,443
     # malformed entries should be silently ignored, never turned into domain_suffix
     999.1.1.1/24
     10.8.0.0/33
     2001:::1/64
     bad domain value
+    invalid,comma.domain
   `);
 
-  assert.deepEqual(parsed.domains, ["api.exact.test"]);
-  assert.deepEqual(parsed.domainSuffixes, ["openai.com", "example.org"]);
-  assert.deepEqual(parsed.domainKeywords, ["corp-internal"]);
+  assert.deepEqual(parsed.domains, ["api.exact.test", "exact.clash.test"]);
+  assert.deepEqual(parsed.domainSuffixes, ["openai.com", "example.org", "claude.ai"]);
+  assert.deepEqual(parsed.domainKeywords, ["corp-internal", "clash-kw"]);
   assert.deepEqual(parsed.ipCidrs, [
     "8.8.8.8/32",
     "10.8.0.0/16",
@@ -47,9 +56,13 @@ test("parseCustomRuleLines parses domains, prefixes, IPv4/IPv6 CIDR, and process
     "2606:4700::/32",
     "192.168.1.50/32",
     "2001:db8::1/128",
+    "1.0.0.1/32",
   ]);
-  assert.deepEqual(parsed.processNames, ["Cursor.exe", "WeChat.exe"]);
-  assert.equal(countCustomRules(parsed), 12);
+  assert.deepEqual(parsed.processNames, ["Cursor.exe", "WeChat.exe", "Telegram.exe"]);
+  assert.equal(countCustomRules(parsed), 17);
+  assert.deepEqual(buildProcessPathRegexes(["WeChat.exe", "wechat.exe"]), [
+    "(?i)(^|[\\\\/])WeChat\\.exe$",
+  ]);
 });
 
 test("AI suite built-in lists exclude generic collision-prone processes and broad visualstudio.com", () => {
@@ -65,21 +78,34 @@ test("AI suite built-in lists exclude generic collision-prone processes and broa
   assert.ok(!AI_SUITE_FORCE_PROXY_DOMAINS.includes("vsassets.io"));
   assert.ok(AI_SUITE_FORCE_PROXY_DOMAINS.includes("marketplace.visualstudio.com"));
   assert.ok(AI_SUITE_FORCE_PROXY_DOMAINS.includes("gallerycdn.vsassets.io"));
+  assert.ok(AI_SUITE_FORCE_PROXY_DOMAINS.includes("grok-sandbox.com"));
+  assert.ok(AI_SUITE_FORCE_PROXY_DOMAINS.includes("grokusercontent.com"));
+  assert.ok(AI_SUITE_FORCE_PROXY_DOMAINS.includes("githubcopilot.com"));
+  assert.ok(AI_SUITE_FORCE_PROXY_DOMAINS.includes("livekit.cloud"));
+  assert.ok(AI_SUITE_FORCE_PROXY_DOMAINS.includes("copilot.microsoft.com"));
+  assert.ok(AI_SUITE_FORCE_PROXY_DOMAINS.includes("ai.google"));
 });
 
-test("buildSingBoxConfig wires four-stage pipeline, hosts/local DNS, cn-probe, and AI toggle", () => {
+test("buildSingBoxConfig wires five-stage pipeline, hosts/local DNS, 500ms cn-probe, case-insensitive process regex, BT direct, and AI split", () => {
+  const fakeInfoNode = parseSingleShareUri("trojan://info@127.0.0.1:1080#剩余流量100G")!;
   const node = parseSingleShareUri("trojan://demo@node.example:443#Demo");
   assert.ok(node);
 
   const cfgEnabled = buildSingBoxConfig({
-    nodes: [node],
+    nodes: [fakeInfoNode, node],
     selectedOutbound: node.id,
     routingMode: "rule",
     tunMode: false,
-    forceProxyText: "custom-proxy.test\n1.1.1.1\nfull:only.proxy.test",
+    forceProxyText: "custom-proxy.test\n10.20.0.0/16\nfull:only.proxy.test\nTelegram.exe",
     forceDirectText: "custom-direct.test\n10.8.0.0/16\nkeyword:intranet\nWeChat.exe",
     aiSuiteProxyEnabled: true,
   });
+
+  // Loopback fake info node is excluded from urltest auto group while real node remains
+  const outbounds = cfgEnabled.outbounds as Array<Record<string, unknown>>;
+  const autoGroup = outbounds.find((o) => o.tag === "auto")!;
+  assert.deepEqual(autoGroup.outbounds, [node.tag]);
+  assert.equal(autoGroup.interval, "3m");
 
   const dns = cfgEnabled.dns as {
     servers: Array<Record<string, unknown>>;
@@ -104,22 +130,40 @@ test("buildSingBoxConfig wires four-stage pipeline, hosts/local DNS, cn-probe, a
   assert.equal(route.default_domain_resolver, "dns-direct");
   assert.equal(route.auto_detect_interface, true);
   assert.equal(route.final, "proxy");
+  assert.equal(route.rules[0]?.action, "sniff");
+  assert.equal(route.rules[0]?.timeout, "30ms");
 
-  // DNS rules must include hosts-check at top and cn-probe at bottom
+  // DNS rules: hosts-check -> forceDirect (including process regex) -> global -> forceProxy -> AI domains -> geosite-cn -> !cn -> AI process -> 500ms cn-probe
   assert.equal(dns.rules[0]?.action, "evaluate");
   assert.equal(dns.rules[0]?.server, "dns-hosts");
   assert.equal(dns.rules[1]?.match_response, "hosts-check");
   assert.equal(dns.rules[1]?.response_rcode, "NOERROR");
 
+  const dnsIdxForceDirectProc = dns.rules.findIndex(
+    (r) =>
+      Array.isArray(r.process_path_regex) &&
+      r.process_path_regex.some((p: string) => p.includes("WeChat")),
+  );
+  const dnsIdxGlobal = dns.rules.findIndex((r) => r.clash_mode === "global");
   const cnProbeIdx = dns.rules.findIndex((r) => r.tag === "cn-probe");
-  assert.ok(cnProbeIdx > 0);
+  assert.ok(dnsIdxForceDirectProc > 0);
+  assert.ok(dnsIdxForceDirectProc < dnsIdxGlobal);
+  assert.ok(cnProbeIdx > dnsIdxGlobal);
   assert.equal(dns.rules[cnProbeIdx]?.server, "dns-direct");
+  assert.equal(dns.rules[cnProbeIdx]?.timeout, "500ms");
   assert.equal(dns.rules[cnProbeIdx + 1]?.match_response, "cn-probe");
   assert.equal(dns.rules[cnProbeIdx + 1]?.rule_set, "geoip-cn");
 
-  // Route order: forceDirect before forceProxy before AI before geosite-cn -> !cn -> geoip-cn -> resolve -> post-resolve geoip-cn
+  // Route order: forceDirect -> forceProxy CIDR -> ip_is_private -> global -> forceProxy -> AI domains -> geosite-cn -> !cn -> geoip-cn -> AI processes -> bittorrent -> resolve -> post-resolve geoip-cn
   const idxForceDirect = route.rules.findIndex(
     (r) => Array.isArray(r.domain_suffix) && r.domain_suffix.includes("custom-direct.test"),
+  );
+  const idxForceProxyCidr = route.rules.findIndex(
+    (r) => Array.isArray(r.ip_cidr) && r.ip_cidr.includes("10.20.0.0/16"),
+  );
+  const idxFirstPrivate = route.rules.findIndex((r) => r.ip_is_private === true);
+  const idxGlobalMode = route.rules.findIndex(
+    (r) => r.clash_mode === "global" && r.outbound === "proxy",
   );
   const idxForceProxy = route.rules.findIndex(
     (r) => Array.isArray(r.domain_suffix) && r.domain_suffix.includes("custom-proxy.test"),
@@ -131,6 +175,17 @@ test("buildSingBoxConfig wires four-stage pipeline, hosts/local DNS, cn-probe, a
   const idxGeositeNotCn = route.rules.findIndex(
     (r) => r.rule_set === "geosite-geolocation-!cn",
   );
+  const idxPreResolveGeoipCn = route.rules.findIndex(
+    (r, idx) => idx > idxGeositeNotCn && r.rule_set === "geoip-cn",
+  );
+  const idxAiProcess = route.rules.findIndex(
+    (r) =>
+      Array.isArray(r.process_path_regex) &&
+      r.process_path_regex.some((p: string) => p.includes("Cursor")),
+  );
+  const idxBtDirect = route.rules.findIndex(
+    (r) => r.protocol === "bittorrent" && r.outbound === "direct",
+  );
   const idxTailResolve = route.rules.findIndex(
     (r, idx) => idx > idxGeositeNotCn && r.action === "resolve",
   );
@@ -139,11 +194,17 @@ test("buildSingBoxConfig wires four-stage pipeline, hosts/local DNS, cn-probe, a
   );
 
   assert.ok(idxForceDirect > 0);
-  assert.ok(idxForceDirect < idxForceProxy);
+  assert.ok(idxForceDirect < idxGlobalMode);
+  assert.ok(idxForceProxyCidr < idxFirstPrivate);
+  assert.ok(idxFirstPrivate < idxGlobalMode);
+  assert.ok(idxGlobalMode < idxForceProxy);
   assert.ok(idxForceProxy < idxAiDomain);
   assert.ok(idxAiDomain < idxGeositeCn);
   assert.ok(idxGeositeCn < idxGeositeNotCn);
-  assert.ok(idxGeositeNotCn < idxTailResolve);
+  assert.ok(idxGeositeNotCn < idxPreResolveGeoipCn);
+  assert.ok(idxPreResolveGeoipCn < idxAiProcess);
+  assert.ok(idxAiProcess < idxBtDirect);
+  assert.ok(idxBtDirect < idxTailResolve);
   assert.ok(idxTailResolve < idxPostResolveGeoip);
 
   // Rule sets include geosite-private and explicit 3d update_interval
@@ -194,6 +255,8 @@ test("TUN mode QUIC reject stays after direct & forceDirect and skips domestic C
     forceProxyText: "",
     forceDirectText: "bilibili.com",
   });
+  const inbounds = cfgTun.inbounds as Array<Record<string, unknown>>;
+  assert.equal(inbounds.find((i) => i.type === "tun")?.mtu, 1480);
   const rules = (cfgTun.route as { rules: Array<Record<string, unknown>> }).rules;
   const idxDirectMode = rules.findIndex((r) => r.clash_mode === "direct");
   const idxForceDirect = rules.findIndex(
@@ -227,18 +290,21 @@ test("laynet-core check passes with zero errors and warnings for generated Syste
   const node = parseSingleShareUri(
     "hysteria2://secret@hy2.example:443/?sni=hy2.example&mport=20000-40000#HY2",
   );
-  assert.ok(node);
+  const huNode = parseSingleShareUri(
+    "vless://11111111-1111-1111-1111-111111111111@hu.example:443?security=tls&type=httpupgrade&host=hu.example&path=/ws#VLESS-HU",
+  );
+  assert.ok(node && huNode);
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "laynet-core-check-"));
   try {
     for (const tunMode of [false, true]) {
       for (const aiSuiteProxyEnabled of [true, false]) {
         const cfg = buildSingBoxConfig({
-          nodes: [node],
+          nodes: [node, huNode],
           selectedOutbound: node.id,
           routingMode: "rule",
           tunMode,
-          forceProxyText: "openai.com\n1.1.1.1\n2606:4700::/32\nfull:api.example.com\ncursor.exe",
+          forceProxyText: "DOMAIN-SUFFIX,openai.com\n1.1.1.1\n10.20.0.0/16\n2606:4700::/32\nfull:api.example.com\ncursor.exe",
           forceDirectText: "qq.com\n10.8.0.0/16\nkeyword:corp\nWeChat.exe",
           aiSuiteProxyEnabled,
         });

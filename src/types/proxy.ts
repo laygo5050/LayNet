@@ -7,7 +7,7 @@ export type ThemeMode = "system" | "light" | "dark";
 export type NavTab = "dashboard" | "nodes" | "settings";
 
 export interface NodeTransportConfig {
-  type: "ws" | "grpc" | "http";
+  type: "ws" | "grpc" | "http" | "httpupgrade";
   path?: string;
   host?: string;
   serviceName?: string;
@@ -132,7 +132,6 @@ export interface LaunchContext {
   silent: boolean;
   relaunchTun: boolean;
   isAdmin: boolean;
-  serviceInstalled: boolean;
   sysProxyEnabled: boolean;
   preferredSysProxy: boolean;
   coreRunning: boolean;

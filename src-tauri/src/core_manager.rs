@@ -39,8 +39,8 @@ use crate::{
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-/// 宽松 Go 内存软上限：既防止长时间大流量后内存无限增长，又保证 600+ Mbps 满速吞吐零 GC 抖动
-const CORE_GO_MEM_LIMIT: &str = "64MiB";
+/// 宽松 Go 内存软上限：适配 4 份二进制规则集常驻 + LayTun 系统栈 + 千兆 Hysteria2 QUIC 缓冲，杜绝高速下载时 GC 抖动限速
+const CORE_GO_MEM_LIMIT: &str = "256MiB";
 
 const DEFAULT_READY_TIMEOUT: Duration = Duration::from_millis(15_000);
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(80);
@@ -169,6 +169,8 @@ pub trait CoreDriver: Send + Sync {
     fn release_proxy_if_owned(&self, port: u16);
 
     fn sync_ui(&self, snapshot: &TraySyncPayload, unexpected_exit: Option<&CoreExitEvent>);
+
+    fn on_tun_ready(&self) {}
 }
 
 struct ManagedCoreEntry {
@@ -405,6 +407,27 @@ pub fn probe_endpoints_live(endpoints: &ProbeEndpoints) -> bool {
         }
     }
     true
+}
+
+/// 启动候选内核前检测本地端口是否已被外部代理客户端监听（connect_timeout 免疫 TIME_WAIT 假阳性）
+pub fn ensure_local_ports_free(endpoints: &ProbeEndpoints) -> Result<(), String> {
+    let mut check_addrs = vec![("Clash 控制端口", endpoints.clash_api_addr)];
+    if let Some(mixed) = endpoints.mixed_addr {
+        check_addrs.insert(0, ("本地代理端口", mixed));
+    }
+
+    for (label, addr) in check_addrs {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(80)).is_ok() {
+            std::thread::sleep(Duration::from_millis(60));
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(80)).is_ok() {
+                return Err(format!(
+                    "{} ({}) 已被其他代理软件占用，请先关闭冲突客户端后重试",
+                    label, addr
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn probe_clash_api_version(addr: SocketAddr) -> bool {
@@ -701,6 +724,11 @@ impl CoreDriver for TauriCoreDriver {
         on_stdio: StdioCallback,
         on_exit: ExitCallback,
     ) -> Result<Box<dyn ManagedProcessHandle>, String> {
+        if let Ok(cfg_raw) = fs::read_to_string(config_path) {
+            let endpoints = parse_probe_endpoints(&cfg_raw);
+            ensure_local_ports_free(&endpoints)?;
+        }
+
         let config_str = config_path.to_string_lossy().to_string();
         let runtime_str = runtime_dir.to_string_lossy().to_string();
         let path_env = match std::env::var("PATH") {
@@ -729,10 +757,15 @@ impl CoreDriver for TauriCoreDriver {
                     CommandEvent::Stderr(bytes) | CommandEvent::Stdout(bytes) => {
                         let line = String::from_utf8_lossy(&bytes).trim().to_string();
                         if !line.is_empty() {
-                            if line.contains("FATAL") || line.contains("ERROR") {
+                            let upper = line.to_ascii_uppercase();
+                            let is_err = upper.contains("FATAL") || upper.contains("ERROR");
+                            if is_err {
                                 last_err_line = line.clone();
                             }
-                            on_stdio(run_id, line);
+                            // 仅跨进程转发告警与错误行，避免高速下载时每秒数百条 INFO 连接日志淹没 WebView2 IPC
+                            if is_err || upper.contains("WARN") {
+                                on_stdio(run_id, line);
+                            }
                         }
                     }
                     CommandEvent::Terminated(payload) => {
@@ -779,6 +812,19 @@ impl CoreDriver for TauriCoreDriver {
             if self.app.get_webview_window("main").is_some() {
                 let _ = self.app.emit("core-exited", exit.reason.clone());
             }
+        }
+    }
+
+    fn on_tun_ready(&self) {
+        #[cfg(windows)]
+        {
+            // 开启 TUN 后后台异步刷新系统 Dnscache，清除连网前可能残留的污染 IP（如 127.0.0.1 / 0.0.0.0）
+            let _ = std::thread::spawn(|| {
+                let _ = std::process::Command::new("ipconfig.exe")
+                    .arg("/flushdns")
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+            });
         }
     }
 }
@@ -965,6 +1011,9 @@ impl CoreManager {
             };
             let actual_running = guard.active.is_some();
             payload.connected = actual_running;
+            if payload.terminal_shell.is_none() {
+                payload.terminal_shell = guard.snapshot.terminal_shell.clone();
+            }
             guard.snapshot = payload.clone();
             if let Some(ref mut committed) = guard.last_committed {
                 if actual_running {
@@ -1592,17 +1641,23 @@ impl CoreManager {
         session.active = session.candidate.take();
         session.desired_connected = true;
         session.pending_exit_error = None;
+        let is_tun = committed.tun_mode;
+        let prev_shell = session.snapshot.terminal_shell.clone();
         let snapshot = TraySyncPayload {
             connected: true,
             sys_proxy: committed.sys_proxy,
             tun_mode: committed.tun_mode,
             routing_mode: committed.routing_mode.clone(),
             active_node: committed.active_node.clone(),
+            terminal_shell: prev_shell,
         };
         session.snapshot = snapshot.clone();
         session.last_committed = Some(committed);
         session.state_epoch += 1;
         drop(session);
+        if is_tun {
+            driver.on_tun_ready();
+        }
         driver.sync_ui(&snapshot, None);
         Ok(())
     }
@@ -2410,6 +2465,35 @@ mod tests {
         let _ = t1.join();
         let _ = t2.join();
         assert!(ok);
+    }
+
+    #[test]
+    fn ensure_local_ports_free_detects_occupied_listener_and_allows_unbound_ports() {
+        let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_addr = occupied.local_addr().unwrap();
+        let accept_thread = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let _ = occupied.accept();
+            }
+        });
+
+        let free_probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let free_addr = free_probe.local_addr().unwrap();
+        drop(free_probe);
+
+        let conflict = ensure_local_ports_free(&ProbeEndpoints {
+            clash_api_addr: free_addr,
+            mixed_addr: Some(occupied_addr),
+        });
+        assert!(conflict.is_err());
+        assert!(conflict.unwrap_err().contains("已被其他代理软件占用"));
+        let _ = accept_thread.join();
+
+        let ok = ensure_local_ports_free(&ProbeEndpoints {
+            clash_api_addr: free_addr,
+            mixed_addr: None,
+        });
+        assert!(ok.is_ok());
     }
 
     #[test]
