@@ -60,6 +60,7 @@ import type {
   ProxyNode,
   RoutingMode,
   SubscriptionItem,
+  SystemEnvBackup,
   ThemeMode,
   ToastItem,
 } from "../types/proxy";
@@ -95,6 +96,7 @@ export interface PersistedAppState {
   lastConnected: boolean;
   selectionMigrated: boolean;
   certPinNotice: string | null;
+  systemEnvBackup: SystemEnvBackup | null;
 }
 
 const PERSISTED_KEYS: (keyof PersistedAppState)[] = [
@@ -118,6 +120,7 @@ const PERSISTED_KEYS: (keyof PersistedAppState)[] = [
   "lastConnected",
   "selectionMigrated",
   "certPinNotice",
+  "systemEnvBackup",
 ];
 
 interface EffectiveRuntimeSnapshot {
@@ -290,6 +293,7 @@ export interface AppState extends PersistedAppState {
   /** 设置未声明带宽的 HY2 节点的默认带宽；任一为 0 即走 BBR */
   setBrutalBandwidth: (downMbps: number, upMbps: number) => Promise<void>;
   setDnsLeakProtection: (val: boolean) => Promise<void>;
+  setSystemEnvBackup: (backup: SystemEnvBackup | null) => void;
   setAutoRestoreConnect: (val: boolean) => void;
   setAutoRefreshSubs: (val: boolean) => void;
   closeAllConnections: () => Promise<void>;
@@ -465,6 +469,30 @@ export function migratePersistedState(
     migrated.lastConnected = raw.lastConnected;
   }
 
+  if (raw.systemEnvBackup && typeof raw.systemEnvBackup === "object") {
+    const b = raw.systemEnvBackup as Record<string, unknown>;
+    const tz =
+      typeof b.windowsTimezone === "string" ? b.windowsTimezone.trim() : "";
+    const langs = Array.isArray(b.languages)
+      ? b.languages.filter(
+          (item): item is string =>
+            typeof item === "string" && item.trim().length > 0,
+        )
+      : [];
+    if (tz && langs.length > 0) {
+      migrated.systemEnvBackup = {
+        windowsTimezone: tz,
+        languages: langs,
+        savedAt:
+          typeof b.savedAt === "number" && Number.isFinite(b.savedAt)
+            ? b.savedAt
+            : Date.now(),
+      };
+    }
+  } else if (raw.systemEnvBackup === null) {
+    migrated.systemEnvBackup = null;
+  }
+
   const savedNotice =
     typeof raw.certPinNotice === "string" && raw.certPinNotice.trim()
       ? raw.certPinNotice
@@ -512,6 +540,7 @@ export function extractPersistedAppState(state: AppState): PersistedAppState {
     lastConnected: state.lastConnected,
     selectionMigrated: state.selectionMigrated,
     certPinNotice: state.certPinNotice,
+    systemEnvBackup: state.systemEnvBackup,
   };
 }
 
@@ -1295,6 +1324,7 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
       lastConnected: false,
       selectionMigrated: true,
       certPinNotice: null,
+      systemEnvBackup: null,
 
       activeTab: "dashboard",
       settingsSubTab: "connections",
@@ -2521,6 +2551,8 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
           );
         }
       },
+
+      setSystemEnvBackup: (backup) => set({ systemEnvBackup: backup }),
 
       setAutoRestoreConnect: (val) => set({ autoRestoreConnect: val }),
       setAutoRefreshSubs: (val) => set({ autoRefreshSubs: val }),

@@ -159,3 +159,37 @@ export interface CoreApplyResult {
   rollbackError?: string | null;
   runningAfter: boolean;
 }
+
+export interface SystemEnvInfo {
+  windowsTimezone: string;
+  languages: string[];
+  detectedBrowser: string | null;
+}
+
+export interface SystemEnvBackup {
+  windowsTimezone: string;
+  languages: string[];
+  savedAt: number;
+}
+
+export interface ProxyGeoInfo {
+  ip: string;
+  countryCode: string;
+  countryName: string;
+  region?: string;
+  city?: string;
+  ianaTimezone: string;
+  provider: string;
+}
+
+export interface EnvCheckReport {
+  proxyGeo: ProxyGeoInfo;
+  localEnv: SystemEnvInfo;
+  targetWindowsTimezone: string | null;
+  timezoneMatch: boolean;
+  recommendedLanguage: string;
+  recommendedLanguageLabel: string;
+  acceptedLanguages: string[];
+  localPrimaryLanguage: string;
+  languageMatch: boolean;
+}

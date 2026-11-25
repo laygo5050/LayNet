@@ -1,4 +1,5 @@
 mod core_manager;
+mod env_fix;
 mod privilege;
 mod proxy;
 mod tray;
@@ -237,6 +238,64 @@ async fn fetch_raw_text(
     .map_err(|e| format!("异步任务执行异常: {}", e))?
 }
 
+#[tauri::command]
+async fn fetch_proxy_text(
+    core: tauri::State<'_, CoreManager>,
+    url: String,
+) -> Result<String, String> {
+    if !core.is_running() {
+        return Err("请先连接代理节点后再检测出口地区".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || env_fix::fetch_text_via_proxy(&url, 7890))
+        .await
+        .map_err(|e| format!("异步任务执行异常: {}", e))?
+}
+
+#[tauri::command]
+async fn get_system_env_info() -> Result<env_fix::SystemEnvInfo, String> {
+    tauri::async_runtime::spawn_blocking(env_fix::get_system_env_info)
+        .await
+        .map_err(|e| format!("异步任务执行异常: {}", e))?
+}
+
+#[tauri::command]
+async fn set_system_timezone(tz_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || env_fix::set_windows_timezone(&tz_id))
+        .await
+        .map_err(|e| format!("异步任务执行异常: {}", e))?
+}
+
+#[tauri::command]
+async fn set_system_languages(
+    languages: Vec<String>,
+    exact_restore: bool,
+) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        env_fix::set_windows_languages(&languages, exact_restore)
+    })
+    .await
+    .map_err(|e| format!("异步任务执行异常: {}", e))?
+}
+
+#[tauri::command]
+async fn launch_localized_browser(
+    app: AppHandle,
+    core: tauri::State<'_, CoreManager>,
+    lang: String,
+    url: Option<String>,
+) -> Result<String, String> {
+    let profile_root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("无法获取应用数据目录: {}", e))?;
+    let proxy_port = if core.is_running() { Some(7890) } else { None };
+    tauri::async_runtime::spawn_blocking(move || {
+        env_fix::launch_localized_browser(&profile_root, &lang, proxy_port, url.as_deref())
+    })
+    .await
+    .map_err(|e| format!("异步任务执行异常: {}", e))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
@@ -306,6 +365,11 @@ pub fn run() {
             settle_cached_core_config,
             release_window_to_tray,
             fetch_raw_text,
+            fetch_proxy_text,
+            get_system_env_info,
+            set_system_timezone,
+            set_system_languages,
+            launch_localized_browser,
         ])
         .build(tauri::generate_context!())
         .expect("构建 LayNet 应用实例失败");

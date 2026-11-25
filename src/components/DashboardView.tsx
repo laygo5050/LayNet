@@ -5,6 +5,7 @@ import {
   ArrowUp,
   Check,
   ChevronRight,
+  Compass,
   Copy,
   Globe,
   ListFilter,
@@ -22,6 +23,7 @@ import { getNodeDisplayMap, resolveNodeDisplayName } from "../lib/uriParser";
 import { useAppStore } from "../store/useAppStore";
 import { useTelemetryStore } from "../store/useTelemetryStore";
 import type { RoutingMode } from "../types/proxy";
+import { EnvCheckModal } from "./EnvCheckModal";
 
 /**
  * 极简圆滑 SVG 实时速率曲线图（零第三方图表依赖）
@@ -94,12 +96,14 @@ export function DashboardView() {
   const setAiSuiteProxyEnabled = useAppStore((s) => s.setAiSuiteProxyEnabled);
   const rulesDirty = useAppStore((s) => s.rulesDirty);
   const applyCustomRules = useAppStore((s) => s.applyCustomRules);
+  const systemEnvBackup = useAppStore((s) => s.systemEnvBackup);
 
   const traffic = useTelemetryStore((s) => s.traffic);
   const trafficHistory = useTelemetryStore((s) => s.trafficHistory);
   const connCount = useTelemetryStore((s) => s.connections.length);
 
   const [showRulesModal, setShowRulesModal] = useState(false);
+  const [showEnvModal, setShowEnvModal] = useState(false);
 
   const proxyRuleCount = useMemo(
     () => countCustomRules(parseCustomRuleLines(forceProxyText)),
@@ -525,44 +529,77 @@ export function DashboardView() {
         </div>
       </div>
 
-      {/* 4. 底部折叠式自定义分流胶囊条 */}
-      <button
-        type="button"
-        onClick={() => setShowRulesModal(true)}
-        className="flex items-center justify-between rounded-full bg-white px-4 py-2.5 shadow-[0_2px_12px_rgba(15,23,42,0.02)] ring-1 ring-black/[0.04] transition hover:ring-black/[0.09] active:scale-[0.995] dark:bg-[#14171F] dark:ring-white/[0.06] dark:hover:ring-white/[0.12] cursor-pointer"
-      >
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-slate-100 text-slate-500 dark:bg-white/[0.06] dark:text-slate-400">
-            <ListFilter className="h-3.5 w-3.5" />
-          </div>
-          <span className="text-xs font-semibold text-slate-800 dark:text-slate-100">
-            自定义分流规则
-          </span>
-          {totalCustomRules > 0 ? (
-            <div className="flex items-center gap-1.5">
-              {proxyRuleCount > 0 && (
-                <span className="rounded-full bg-blue-500/12 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-400">
-                  代理 {proxyRuleCount}
-                </span>
-              )}
-              {directRuleCount > 0 && (
-                <span className="rounded-full bg-emerald-500/12 px-2 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
-                  直连 {directRuleCount}
-                </span>
-              )}
+      {/* 4. 底部双胶囊工具条：自定义分流规则 + 环境一致性检测 */}
+      <div className="grid grid-cols-12 gap-3">
+        <button
+          type="button"
+          onClick={() => setShowRulesModal(true)}
+          className="col-span-7 flex items-center justify-between rounded-full bg-white px-4 py-2.5 shadow-[0_2px_12px_rgba(15,23,42,0.02)] ring-1 ring-black/[0.04] transition hover:ring-black/[0.09] active:scale-[0.995] dark:bg-[#14171F] dark:ring-white/[0.06] dark:hover:ring-white/[0.12] cursor-pointer"
+        >
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 dark:bg-white/[0.06] dark:text-slate-400">
+              <ListFilter className="h-3.5 w-3.5" />
             </div>
-          ) : (
-            <span className="text-[11px] text-slate-400">
-              {aiSuiteProxyEnabled ? "智能分流 · AI 加速" : "默认智能分流"}
+            <span className="shrink-0 text-xs font-semibold text-slate-800 dark:text-slate-100">
+              自定义分流规则
             </span>
-          )}
-        </div>
+            {totalCustomRules > 0 ? (
+              <div className="flex items-center gap-1.5 overflow-hidden">
+                {proxyRuleCount > 0 && (
+                  <span className="shrink-0 rounded-full bg-blue-500/12 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-400">
+                    代理 {proxyRuleCount}
+                  </span>
+                )}
+                {directRuleCount > 0 && (
+                  <span className="shrink-0 rounded-full bg-emerald-500/12 px-2 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                    直连 {directRuleCount}
+                  </span>
+                )}
+              </div>
+            ) : (
+              <span className="truncate text-[11px] text-slate-400">
+                {aiSuiteProxyEnabled ? "智能分流 · AI 加速" : "默认智能分流"}
+              </span>
+            )}
+          </div>
 
-        <div className="flex items-center gap-1 text-[11px] font-medium text-slate-400">
-          <span>{rulesDirty ? "待应用" : "查看编辑"}</span>
-          <ChevronRight className="h-3.5 w-3.5" />
-        </div>
-      </button>
+          <div className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-slate-400">
+            <span>{rulesDirty ? "待应用" : "编辑"}</span>
+            <ChevronRight className="h-3.5 w-3.5" />
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setShowEnvModal(true)}
+          className="col-span-5 flex items-center justify-between rounded-full bg-white px-4 py-2.5 shadow-[0_2px_12px_rgba(15,23,42,0.02)] ring-1 ring-black/[0.04] transition hover:ring-black/[0.09] active:scale-[0.995] dark:bg-[#14171F] dark:ring-white/[0.06] dark:hover:ring-white/[0.12] cursor-pointer"
+        >
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 dark:bg-white/[0.06] dark:text-slate-400">
+              <Compass className="h-3.5 w-3.5" />
+            </div>
+            <span className="shrink-0 text-xs font-semibold text-slate-800 dark:text-slate-100">
+              环境检测
+            </span>
+            {systemEnvBackup ? (
+              <span className="truncate rounded-full bg-amber-500/12 px-2 py-0.5 text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+                已修改 · 可还原
+              </span>
+            ) : (
+              <span className="truncate text-[11px] text-slate-400">
+                时区 / 语言
+              </span>
+            )}
+          </div>
+
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+        </button>
+      </div>
+
+      <EnvCheckModal
+        open={showEnvModal}
+        onClose={() => setShowEnvModal(false)}
+      />
 
       {/* 按需弹出的圆角自定义分流编辑窗 */}
       {showRulesModal && (

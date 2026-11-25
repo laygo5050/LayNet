@@ -14,6 +14,7 @@ import type {
   CoreApplyResult,
   LaunchContext,
   RoutingMode,
+  SystemEnvInfo,
 } from "../types/proxy";
 
 export function isTauriRuntime(): boolean {
@@ -192,4 +193,59 @@ export function buildTerminalProxyCommand(shell: "powershell" | "cmd" = "powersh
     return 'set HTTP_PROXY=http://127.0.0.1:7890&& set HTTPS_PROXY=http://127.0.0.1:7890&& set ALL_PROXY=socks5://127.0.0.1:7890';
   }
   return '$env:HTTP_PROXY="http://127.0.0.1:7890"; $env:HTTPS_PROXY="http://127.0.0.1:7890"; $env:ALL_PROXY="socks5://127.0.0.1:7890"';
+}
+
+export async function fetchTextViaProxy(url: string): Promise<string> {
+  if (isTauriRuntime()) {
+    return invoke<string>("fetch_proxy_text", { url });
+  }
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  return res.text();
+}
+
+export async function getSystemEnvInfo(): Promise<SystemEnvInfo> {
+  if (!isTauriRuntime()) {
+    return {
+      windowsTimezone: "China Standard Time",
+      languages: [typeof navigator !== "undefined" ? navigator.language : "zh-CN"],
+      detectedBrowser: null,
+    };
+  }
+  return invoke<SystemEnvInfo>("get_system_env_info");
+}
+
+export async function setSystemTimezone(tzId: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("非桌面环境不支持修改系统时区");
+  }
+  await invoke("set_system_timezone", { tzId });
+}
+
+export async function setSystemLanguages(
+  languages: string[],
+  exactRestore = false,
+): Promise<string[]> {
+  if (!isTauriRuntime()) {
+    throw new Error("非桌面环境不支持修改系统首选语言");
+  }
+  return invoke<string[]>("set_system_languages", {
+    languages,
+    exactRestore,
+  });
+}
+
+export async function launchLocalizedBrowser(
+  lang: string,
+  url?: string,
+): Promise<string> {
+  if (!isTauriRuntime()) {
+    throw new Error("非桌面环境不支持启动隔离浏览器");
+  }
+  return invoke<string>("launch_localized_browser", {
+    lang,
+    url: url ?? null,
+  });
 }
