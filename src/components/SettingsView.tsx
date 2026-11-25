@@ -25,12 +25,15 @@ const BRUTAL_PRESETS = [
 
 export function SettingsView() {
   const connected = useAppStore((s) => s.connected);
+  const connecting = useAppStore((s) => s.connecting);
   const autostartEnabled = useAppStore((s) => s.autostartEnabled);
   const toggleAutostart = useAppStore((s) => s.toggleAutostart);
   const autoRestoreConnect = useAppStore((s) => s.autoRestoreConnect);
   const setAutoRestoreConnect = useAppStore((s) => s.setAutoRestoreConnect);
   const autoRefreshSubs = useAppStore((s) => s.autoRefreshSubs);
   const setAutoRefreshSubs = useAppStore((s) => s.setAutoRefreshSubs);
+  const dnsLeakProtection = useAppStore((s) => s.dnsLeakProtection);
+  const setDnsLeakProtection = useAppStore((s) => s.setDnsLeakProtection);
   const brutalDownMbps = useAppStore((s) => s.brutalDownMbps);
   const brutalUpMbps = useAppStore((s) => s.brutalUpMbps);
   const setBrutalBandwidth = useAppStore((s) => s.setBrutalBandwidth);
@@ -105,17 +108,17 @@ export function SettingsView() {
   return (
     <div className="flex h-full flex-col gap-3 p-4 pl-3 overflow-hidden">
       {/* 上半区：极简圆角开关卡片组 */}
-      <div className="grid grid-cols-4 gap-2.5">
+      <div className="grid grid-cols-5 gap-2">
         <button
           type="button"
           onClick={() => void toggleAutostart()}
-          className="flex items-center justify-between rounded-[22px] bg-white px-4 py-3 text-left ring-1 ring-black/[0.04] transition hover:ring-black/[0.08] active:scale-[0.99] dark:bg-[#14171F] dark:ring-white/[0.06] cursor-pointer"
+          className="flex items-center justify-between rounded-[22px] bg-white px-3 py-3 text-left ring-1 ring-black/[0.04] transition hover:ring-black/[0.08] active:scale-[0.99] dark:bg-[#14171F] dark:ring-white/[0.06] cursor-pointer"
         >
-          <span className="text-xs font-semibold text-slate-800 dark:text-slate-100">
+          <span className="whitespace-nowrap text-xs font-semibold text-slate-800 dark:text-slate-100">
             开机自启
           </span>
           <div
-            className={`h-5 w-9 rounded-full p-0.5 transition-colors ${
+            className={`h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors ${
               autostartEnabled ? "bg-blue-600" : "bg-slate-200 dark:bg-white/[0.12]"
             }`}
           >
@@ -131,13 +134,13 @@ export function SettingsView() {
           type="button"
           onClick={() => setAutoRestoreConnect(!autoRestoreConnect)}
           title="打开软件或开机静默启动时，自动恢复上次的连接状态"
-          className="flex items-center justify-between rounded-[22px] bg-white px-4 py-3 text-left ring-1 ring-black/[0.04] transition hover:ring-black/[0.08] active:scale-[0.99] dark:bg-[#14171F] dark:ring-white/[0.06] cursor-pointer"
+          className="flex items-center justify-between rounded-[22px] bg-white px-3 py-3 text-left ring-1 ring-black/[0.04] transition hover:ring-black/[0.08] active:scale-[0.99] dark:bg-[#14171F] dark:ring-white/[0.06] cursor-pointer"
         >
-          <span className="text-xs font-semibold text-slate-800 dark:text-slate-100">
+          <span className="whitespace-nowrap text-xs font-semibold text-slate-800 dark:text-slate-100">
             启动自连
           </span>
           <div
-            className={`h-5 w-9 rounded-full p-0.5 transition-colors ${
+            className={`h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors ${
               autoRestoreConnect ? "bg-blue-600" : "bg-slate-200 dark:bg-white/[0.12]"
             }`}
           >
@@ -152,13 +155,13 @@ export function SettingsView() {
         <button
           type="button"
           onClick={() => setAutoRefreshSubs(!autoRefreshSubs)}
-          className="flex items-center justify-between rounded-[22px] bg-white px-4 py-3 text-left ring-1 ring-black/[0.04] transition hover:ring-black/[0.08] active:scale-[0.99] dark:bg-[#14171F] dark:ring-white/[0.06] cursor-pointer"
+          className="flex items-center justify-between rounded-[22px] bg-white px-3 py-3 text-left ring-1 ring-black/[0.04] transition hover:ring-black/[0.08] active:scale-[0.99] dark:bg-[#14171F] dark:ring-white/[0.06] cursor-pointer"
         >
-          <span className="text-xs font-semibold text-slate-800 dark:text-slate-100">
+          <span className="whitespace-nowrap text-xs font-semibold text-slate-800 dark:text-slate-100">
             静默更订阅
           </span>
           <div
-            className={`h-5 w-9 rounded-full p-0.5 transition-colors ${
+            className={`h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors ${
               autoRefreshSubs ? "bg-blue-600" : "bg-slate-200 dark:bg-white/[0.12]"
             }`}
           >
@@ -172,18 +175,41 @@ export function SettingsView() {
 
         <button
           type="button"
+          disabled={connecting}
+          onClick={() => void setDnsLeakProtection(!dnsLeakProtection)}
+          title="开启后未知域名仅经代理走远程 DoH 解析，不向国内 DNS 探测；常用国内站与冷门国内 IP 仍自动直连"
+          className="flex items-center justify-between rounded-[22px] bg-white px-3 py-3 text-left ring-1 ring-black/[0.04] transition hover:ring-black/[0.08] active:scale-[0.99] disabled:opacity-50 dark:bg-[#14171F] dark:ring-white/[0.06] cursor-pointer"
+        >
+          <span className="whitespace-nowrap text-xs font-semibold text-slate-800 dark:text-slate-100">
+            DNS防泄露
+          </span>
+          <div
+            className={`h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors ${
+              dnsLeakProtection ? "bg-blue-600" : "bg-slate-200 dark:bg-white/[0.12]"
+            }`}
+          >
+            <div
+              className={`h-4 w-4 rounded-full bg-white shadow-2xs transition-transform ${
+                dnsLeakProtection ? "translate-x-4" : "translate-x-0"
+              }`}
+            />
+          </div>
+        </button>
+
+        <button
+          type="button"
           onClick={() => {
             if (!isAdmin) setShowTunPrivilegeModal(true);
           }}
-          className="flex items-center justify-between rounded-[22px] bg-white px-4 py-3 text-left ring-1 ring-black/[0.04] transition hover:ring-black/[0.08] active:scale-[0.99] dark:bg-[#14171F] dark:ring-white/[0.06] cursor-pointer"
+          className="flex items-center justify-between rounded-[22px] bg-white px-3 py-3 text-left ring-1 ring-black/[0.04] transition hover:ring-black/[0.08] active:scale-[0.99] dark:bg-[#14171F] dark:ring-white/[0.06] cursor-pointer"
         >
-          <span className="text-xs font-semibold text-slate-800 dark:text-slate-100">
+          <span className="whitespace-nowrap text-xs font-semibold text-slate-800 dark:text-slate-100">
             {isAdmin ? "管理员就绪" : "获取权限"}
           </span>
           {isAdmin ? (
-            <ShieldCheck className="h-4 w-4 text-emerald-500" />
+            <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-500" />
           ) : (
-            <ShieldAlert className="h-4 w-4 text-amber-500" />
+            <ShieldAlert className="h-4 w-4 shrink-0 text-amber-500" />
           )}
         </button>
       </div>

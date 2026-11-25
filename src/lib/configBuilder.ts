@@ -161,6 +161,7 @@ export interface BuildSingBoxConfigInput {
   forceProxyText: string;
   forceDirectText: string;
   aiSuiteProxyEnabled?: boolean;
+  dnsLeakProtection?: boolean;
   brutalDownMbps?: number;
   brutalUpMbps?: number;
   mixedPort?: number;
@@ -822,6 +823,7 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
   const forceProxy = parseCustomRuleLines(input.forceProxyText);
   const forceDirect = parseCustomRuleLines(input.forceDirectText);
   const aiSuiteProxyEnabled = input.aiSuiteProxyEnabled ?? true;
+  const dnsLeakProtection = input.dnsLeakProtection ?? true;
 
   const forceDirectDomainMatcher = buildDomainMatcherFields(forceDirect);
   const forceProxyDomainMatcher = buildDomainMatcherFields(forceProxy);
@@ -835,7 +837,7 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
   // 3) 全局直连 / 用户「强制直连」始终优先走国内 DNS（即使切到全局代理模式也尊重强制直连白名单）
   // 4) 用户「强制代理」与 AI 核心域名直达远程防污染 DoH
   // 5) 国内主流域名走 dns-direct，海外主流域名与 AI 进程兜底走 dns-remote
-  // 6) 未知尾部域名经 500ms 快速国内探测，命中 geoip-cn 采纳，否则防污染回退至 dns-remote
+  // 6) DNS 防泄露开启时（默认）：未知尾部域名不向国内 DNS 探测，直接走 dns-remote（方案 A）；关闭时启用 500ms cn-probe 国内探测
   const dnsRules: Record<string, unknown>[] = [
     {
       action: "evaluate",
@@ -911,17 +913,19 @@ export function buildSingBoxConfig(input: BuildSingBoxConfigInput): Record<strin
       server: "dns-remote",
     });
   }
-  dnsRules.push({
-    action: "evaluate",
-    server: "dns-direct",
-    tag: "cn-probe",
-    timeout: "500ms",
-  });
-  dnsRules.push({
-    match_response: "cn-probe",
-    rule_set: "geoip-cn",
-    action: "respond",
-  });
+  if (!dnsLeakProtection) {
+    dnsRules.push({
+      action: "evaluate",
+      server: "dns-direct",
+      tag: "cn-probe",
+      timeout: "500ms",
+    });
+    dnsRules.push({
+      match_response: "cn-probe",
+      rule_set: "geoip-cn",
+      action: "respond",
+    });
+  }
 
   // 路由规则合成：30ms 本机极速嗅探 + 回环死锁保护 + 强制直连超越全局代理 + 国内/海外精准分流
   const routeRules: Record<string, unknown>[] = [

@@ -83,6 +83,7 @@ export interface PersistedAppState {
   forceProxyText: string;
   forceDirectText: string;
   aiSuiteProxyEnabled: boolean;
+  dnsLeakProtection: boolean;
   theme: ThemeMode;
   terminalShell: "powershell" | "cmd";
   /** 未声明带宽的 HY2 节点使用的默认下行 Mbps；0 = BBR */
@@ -107,6 +108,7 @@ const PERSISTED_KEYS: (keyof PersistedAppState)[] = [
   "forceProxyText",
   "forceDirectText",
   "aiSuiteProxyEnabled",
+  "dnsLeakProtection",
   "theme",
   "terminalShell",
   "brutalDownMbps",
@@ -129,6 +131,7 @@ interface EffectiveRuntimeSnapshot {
   forceProxyText: string;
   forceDirectText: string;
   aiSuiteProxyEnabled: boolean;
+  dnsLeakProtection: boolean;
   brutalDownMbps: number;
   brutalUpMbps: number;
 }
@@ -286,6 +289,7 @@ export interface AppState extends PersistedAppState {
   toggleAutostart: () => Promise<void>;
   /** 设置未声明带宽的 HY2 节点的默认带宽；任一为 0 即走 BBR */
   setBrutalBandwidth: (downMbps: number, upMbps: number) => Promise<void>;
+  setDnsLeakProtection: (val: boolean) => Promise<void>;
   setAutoRestoreConnect: (val: boolean) => void;
   setAutoRefreshSubs: (val: boolean) => void;
   closeAllConnections: () => Promise<void>;
@@ -431,6 +435,9 @@ export function migratePersistedState(
   if (typeof raw.aiSuiteProxyEnabled === "boolean") {
     migrated.aiSuiteProxyEnabled = raw.aiSuiteProxyEnabled;
   }
+  if (typeof raw.dnsLeakProtection === "boolean") {
+    migrated.dnsLeakProtection = raw.dnsLeakProtection;
+  }
   if (raw.theme === "system" || raw.theme === "light" || raw.theme === "dark") {
     migrated.theme = raw.theme;
   }
@@ -495,6 +502,7 @@ export function extractPersistedAppState(state: AppState): PersistedAppState {
     forceProxyText: state.forceProxyText,
     forceDirectText: state.forceDirectText,
     aiSuiteProxyEnabled: state.aiSuiteProxyEnabled,
+    dnsLeakProtection: state.dnsLeakProtection,
     theme: state.theme,
     terminalShell: state.terminalShell,
     brutalDownMbps: state.brutalDownMbps,
@@ -547,6 +555,7 @@ function captureEffectiveSnapshot(state: AppState): EffectiveRuntimeSnapshot {
     forceProxyText: state.forceProxyText,
     forceDirectText: state.forceDirectText,
     aiSuiteProxyEnabled: state.aiSuiteProxyEnabled,
+    dnsLeakProtection: state.dnsLeakProtection,
     brutalDownMbps: state.brutalDownMbps,
     brutalUpMbps: state.brutalUpMbps,
   };
@@ -964,6 +973,7 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
         forceProxyText: state.forceProxyText,
         forceDirectText: state.forceDirectText,
         aiSuiteProxyEnabled: state.aiSuiteProxyEnabled,
+        dnsLeakProtection: state.dnsLeakProtection,
         brutalDownMbps: brutalDown,
         brutalUpMbps: brutalUp,
       });
@@ -996,6 +1006,7 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
         sysProxy: snap.sysProxy,
         sysProxyBeforeTun: snap.sysProxyBeforeTun,
         tunMode: snap.tunMode,
+        dnsLeakProtection: snap.dnsLeakProtection,
         brutalDownMbps: snap.brutalDownMbps,
         brutalUpMbps: snap.brutalUpMbps,
         ...(includeRulesText
@@ -1274,6 +1285,7 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
       forceProxyText: "",
       forceDirectText: "",
       aiSuiteProxyEnabled: true,
+      dnsLeakProtection: true,
       theme: "system",
       terminalShell: "powershell",
       brutalDownMbps: 0,
@@ -2486,6 +2498,27 @@ export function createAppStore(deps: AppStoreDependencies = {}): CreatedAppStore
                 : `未声明带宽的 HY2 节点默认 Brutal ↓${down} / ↑${up} Mbps`,
             );
           }
+        }
+      },
+
+      setDnsLeakProtection: async (val) => {
+        if (get().dnsLeakProtection === val) return;
+        set({ dnsLeakProtection: val });
+        if (get().connected) {
+          const status = await get().reloadCoreConfig(true);
+          if (status === "applied") {
+            get().pushToast(
+              "success",
+              val
+                ? "DNS 防泄露已开启（未知域名仅经代理解析）"
+                : "DNS 防泄露已关闭（恢复未知域名国内探测）",
+            );
+          }
+        } else {
+          get().pushToast(
+            "success",
+            val ? "DNS 防泄露已开启，连接时生效" : "DNS 防泄露已关闭",
+          );
         }
       },
 

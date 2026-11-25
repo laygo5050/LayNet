@@ -13,7 +13,7 @@ import {
   parseCustomRuleLines,
 } from "../lib/configBuilder";
 import { parseSingleShareUri } from "../lib/uriParser";
-import { migratePersistedState } from "../store/useAppStore";
+import { createAppStore, migratePersistedState } from "../store/useAppStore";
 
 test("parseCustomRuleLines parses domains, prefixes, IPv4/IPv6 CIDR, and processes accurately", () => {
   const parsed = parseCustomRuleLines(`
@@ -145,14 +145,29 @@ test("buildSingBoxConfig wires five-stage pipeline, hosts/local DNS, 500ms cn-pr
       r.process_path_regex.some((p: string) => p.includes("WeChat")),
   );
   const dnsIdxGlobal = dns.rules.findIndex((r) => r.clash_mode === "global");
-  const cnProbeIdx = dns.rules.findIndex((r) => r.tag === "cn-probe");
+  const cnProbeIdxDefault = dns.rules.findIndex((r) => r.tag === "cn-probe");
   assert.ok(dnsIdxForceDirectProc > 0);
   assert.ok(dnsIdxForceDirectProc < dnsIdxGlobal);
-  assert.ok(cnProbeIdx > dnsIdxGlobal);
-  assert.equal(dns.rules[cnProbeIdx]?.server, "dns-direct");
-  assert.equal(dns.rules[cnProbeIdx]?.timeout, "500ms");
-  assert.equal(dns.rules[cnProbeIdx + 1]?.match_response, "cn-probe");
-  assert.equal(dns.rules[cnProbeIdx + 1]?.rule_set, "geoip-cn");
+  assert.equal(cnProbeIdxDefault, -1);
+
+  const cfgLeakProbe = buildSingBoxConfig({
+    nodes: [fakeInfoNode, node],
+    selectedOutbound: node.id,
+    routingMode: "rule",
+    tunMode: false,
+    forceProxyText: "custom-proxy.test\n10.20.0.0/16\nfull:only.proxy.test\nTelegram.exe",
+    forceDirectText: "custom-direct.test\n10.8.0.0/16\nkeyword:intranet\nWeChat.exe",
+    aiSuiteProxyEnabled: true,
+    dnsLeakProtection: false,
+  });
+  const leakProbeDnsRules = (cfgLeakProbe.dns as { rules: Array<Record<string, unknown>> }).rules;
+  const leakProbeGlobalIdx = leakProbeDnsRules.findIndex((r) => r.clash_mode === "global");
+  const cnProbeIdx = leakProbeDnsRules.findIndex((r) => r.tag === "cn-probe");
+  assert.ok(cnProbeIdx > leakProbeGlobalIdx);
+  assert.equal(leakProbeDnsRules[cnProbeIdx]?.server, "dns-direct");
+  assert.equal(leakProbeDnsRules[cnProbeIdx]?.timeout, "500ms");
+  assert.equal(leakProbeDnsRules[cnProbeIdx + 1]?.match_response, "cn-probe");
+  assert.equal(leakProbeDnsRules[cnProbeIdx + 1]?.rule_set, "geoip-cn");
 
   // Route order: forceDirect -> forceProxy CIDR -> ip_is_private -> global -> forceProxy -> AI domains -> geosite-cn -> !cn -> geoip-cn -> AI processes -> bittorrent -> resolve -> post-resolve geoip-cn
   const idxForceDirect = route.rules.findIndex(
@@ -270,12 +285,82 @@ test("TUN mode QUIC reject stays after direct & forceDirect and skips domestic C
   assert.ok(idxRuleModeQuic > idxForceDirect);
 });
 
-test("migratePersistedState preserves explicit aiSuiteProxyEnabled and keeps default for legacy data", () => {
+test("migratePersistedState preserves explicit aiSuiteProxyEnabled and dnsLeakProtection while keeping defaults for legacy data", () => {
   const legacy = migratePersistedState({ routingMode: "rule" }, 2);
   assert.equal(legacy.aiSuiteProxyEnabled, undefined);
+  assert.equal(legacy.dnsLeakProtection, undefined);
 
-  const explicitFalse = migratePersistedState({ aiSuiteProxyEnabled: false }, 2);
+  const explicitFalse = migratePersistedState(
+    { aiSuiteProxyEnabled: false, dnsLeakProtection: false },
+    2,
+  );
   assert.equal(explicitFalse.aiSuiteProxyEnabled, false);
+  assert.equal(explicitFalse.dnsLeakProtection, false);
+
+  const explicitTrue = migratePersistedState({ dnsLeakProtection: true }, 2);
+  assert.equal(explicitTrue.dnsLeakProtection, true);
+});
+
+test("setDnsLeakProtection defaults to true, hot-reloads config when connected, and rolls back on failure", async () => {
+  const node = parseSingleShareUri("trojan://demo@node.example:443#Demo");
+  assert.ok(node);
+
+  const appliedConfigs: string[] = [];
+  let shouldFailReload = false;
+  const app = createAppStore({
+    storage: null,
+    createTelemetrySession: () => ({ configure: () => {}, stop: () => {} }),
+    fetchConnectionsSnapshot: async () => null,
+    queryAutoWinnerNode: async () => null,
+    getSysProxyState: async () => ({ enabled: true, server: "127.0.0.1:7890" }),
+    syncTrayState: async () => {},
+    applyLayNetCoreConfig: async (req) => {
+      appliedConfigs.push(req.configJson);
+      if (shouldFailReload) {
+        return {
+          status: "rolled_back",
+          failureStage: "readiness",
+          error: "mock readiness failure",
+          runningAfter: true,
+        };
+      }
+      return { status: "applied", runningAfter: true };
+    },
+  });
+
+  try {
+    assert.equal(app.useStore.getState().dnsLeakProtection, true);
+    app.useStore.setState({ nodes: [node], selectedOutbound: node.id });
+
+    await app.useStore.getState().connectCore();
+    assert.equal(app.useStore.getState().connected, true);
+    assert.equal(appliedConfigs.length, 1);
+    const initialDnsRules = (
+      JSON.parse(appliedConfigs[0]!) as { dns: { rules: Array<Record<string, unknown>> } }
+    ).dns.rules;
+    assert.equal(
+      initialDnsRules.some((r) => r.tag === "cn-probe"),
+      false,
+    );
+
+    await app.useStore.getState().setDnsLeakProtection(false);
+    assert.equal(app.useStore.getState().dnsLeakProtection, false);
+    assert.equal(appliedConfigs.length, 2);
+    const probeDnsRules = (
+      JSON.parse(appliedConfigs[1]!) as { dns: { rules: Array<Record<string, unknown>> } }
+    ).dns.rules;
+    assert.equal(
+      probeDnsRules.some((r) => r.tag === "cn-probe"),
+      true,
+    );
+
+    shouldFailReload = true;
+    await app.useStore.getState().setDnsLeakProtection(true);
+    assert.equal(app.useStore.getState().dnsLeakProtection, false);
+    assert.equal(app.useStore.getState().connected, true);
+  } finally {
+    app.dispose();
+  }
 });
 
 test("laynet-core check passes with zero errors and warnings for generated System Proxy and TUN configs", () => {
@@ -299,25 +384,28 @@ test("laynet-core check passes with zero errors and warnings for generated Syste
   try {
     for (const tunMode of [false, true]) {
       for (const aiSuiteProxyEnabled of [true, false]) {
-        const cfg = buildSingBoxConfig({
-          nodes: [node, huNode],
-          selectedOutbound: node.id,
-          routingMode: "rule",
-          tunMode,
-          forceProxyText: "DOMAIN-SUFFIX,openai.com\n1.1.1.1\n10.20.0.0/16\n2606:4700::/32\nfull:api.example.com\ncursor.exe",
-          forceDirectText: "qq.com\n10.8.0.0/16\nkeyword:corp\nWeChat.exe",
-          aiSuiteProxyEnabled,
-        });
-        const cfgPath = path.join(
-          tmpDir,
-          `sample-tun-${tunMode}-ai-${aiSuiteProxyEnabled}.json`,
-        );
-        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
-        const output = execFileSync(coreBin, ["check", "-c", cfgPath, "-D", tmpDir], {
-          encoding: "utf8",
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-        assert.equal(output.trim(), "");
+        for (const dnsLeakProtection of [true, false]) {
+          const cfg = buildSingBoxConfig({
+            nodes: [node, huNode],
+            selectedOutbound: node.id,
+            routingMode: "rule",
+            tunMode,
+            forceProxyText: "DOMAIN-SUFFIX,openai.com\n1.1.1.1\n10.20.0.0/16\n2606:4700::/32\nfull:api.example.com\ncursor.exe",
+            forceDirectText: "qq.com\n10.8.0.0/16\nkeyword:corp\nWeChat.exe",
+            aiSuiteProxyEnabled,
+            dnsLeakProtection,
+          });
+          const cfgPath = path.join(
+            tmpDir,
+            `sample-tun-${tunMode}-ai-${aiSuiteProxyEnabled}-dns-${dnsLeakProtection}.json`,
+          );
+          fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+          const output = execFileSync(coreBin, ["check", "-c", cfgPath, "-D", tmpDir], {
+            encoding: "utf8",
+            stdio: ["pipe", "pipe", "pipe"],
+          });
+          assert.equal(output.trim(), "");
+        }
       }
     }
   } finally {
